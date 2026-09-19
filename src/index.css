@@ -1,0 +1,208 @@
+@import "./styles/tokens.css"; /* 令牌单一来源（shared/css/tokens.css 的同步副本） */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html { scroll-behavior: smooth; }
+  body {
+    @apply bg-canvas text-text-primary font-sans;
+    font-size: 16px;
+    line-height: 1.65;
+  }
+  h1, h2, h3, h4 { @apply text-heading font-bold; line-height: 1.25; }
+  a { text-decoration-thickness: .08em; text-underline-offset: .18em; }
+  :focus-visible { outline: 2px solid var(--color-action); outline-offset: 2px; border-radius: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  /* 顶栏（规范 10 章） */
+  .topbar {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; gap: 1.5rem;
+    min-height: 64px; padding: 0 1rem;
+    background: rgb(255 255 255 / 96%);
+    backdrop-filter: blur(10px);
+    border-bottom: 3px solid var(--ale-purple-600);
+  }
+  :root.dark .topbar { background: rgb(23 20 32 / 96%); }
+  .icon-btn {
+    display: inline-grid; place-items: center;
+    position: relative;   /* v5.4 热区伪元素定位基准 */
+    width: 40px; height: 40px;
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: 1px solid transparent; border-radius: 8px;
+    cursor: pointer;
+    transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease;
+  }
+  .icon-btn:hover { color: var(--color-heading-accent); background: var(--color-purple-tint); }
+
+  /* 按钮（规范 11 章：浮起-按压动画） */
+  .btn {
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 rounded-[8px] border border-transparent
+           px-5 py-2 text-sm font-bold cursor-pointer no-underline;
+    transition: transform var(--motion-fast) ease, box-shadow var(--motion-fast) ease,
+                background-color var(--motion-fast) ease, border-color var(--motion-fast) ease,
+                color var(--motion-fast) ease;
+  }
+  .btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: var(--shadow-hover); }
+  .btn:active:not(:disabled) { transform: translateY(0); box-shadow: none; }
+  .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; box-shadow: none; }
+  /* 状态层（v5.3 规范 11.1：on-* 前景色 × 固定透明度） */
+  .btn, .pg-btn { position: relative; }
+  .btn::after, .pg-btn::after {
+    content: ""; position: absolute; inset: 0;
+    background: currentColor; border-radius: inherit;
+    opacity: 0; pointer-events: none;
+    transition: opacity var(--motion-fast) ease;
+  }
+  .btn:not(:disabled):hover::after, .pg-btn:hover::after { opacity: var(--state-layer-hover); }
+  .btn:focus-visible::after, .pg-btn:focus-visible::after { opacity: var(--state-layer-focus); }
+  .btn:not(:disabled):active::after, .pg-btn:active::after { opacity: var(--state-layer-pressed); }
+  .btn:disabled::after { opacity: 0; }
+  .btn-primary { @apply text-white border-transparent; background: var(--color-action); }
+  .btn-primary:hover:not(:disabled) { background: var(--color-action-hover); }
+  .btn-secondary { @apply text-action border-border bg-surface; }
+  .btn-secondary:hover:not(:disabled) { border-color: var(--color-action); }
+  .btn-danger { @apply text-white border-transparent; background: var(--ale-red); }
+  .btn-sm { @apply min-h-[36px] px-3 text-[13px]; }
+
+  /* 输入框（规范 13 章） */
+  .input {
+    @apply w-full min-h-[44px] px-3 rounded-[8px] border bg-surface text-text-primary text-sm;
+    border-color: var(--color-border);
+    transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+  }
+  .input:focus { outline: none; border-color: var(--color-action); box-shadow: var(--ring-soft); }
+  .input[aria-invalid="true"] { border-color: var(--status-danger-graphic); }
+
+  /* 徽章（规范 15 章：圆点 + 文字） */
+  .badge {
+    @apply inline-flex items-center gap-[0.4em] px-[0.6em] py-[0.18em] rounded-full text-xs font-semibold;
+  }
+  .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+  /* 卡片（shared/css/components.css 同步副本） */
+  .card {
+    padding: var(--space-4);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+  }
+
+  /* 版本徽章（UI-CHECKLIST N5/B3：顶栏 ver-badge，运行时读 version.json 真源） */
+  .ver-badge {
+    display: inline-flex; align-items: center;
+    padding: .18em .7em;
+    border: 1px solid var(--ale-purple-40);
+    border-radius: 999px;
+    background: var(--color-purple-tint);
+    color: var(--color-heading-accent);
+    font-size: 12px; font-weight: 700; line-height: 1.5;
+    white-space: nowrap;
+  }
+  @media (max-width: 560px) {
+    /* 窄屏只显示版本短号，防顶栏溢出（参照规范 OVF-320 做法） */
+    .ver-badge { font-size: 11px; padding: .18em .5em; }
+  }
+}
+
+/* 主题切换过渡（≤300ms，规范 14A.7） */
+.theme-transitioning *, .theme-transitioning *::before, .theme-transitioning *::after {
+  transition: background-color 280ms ease, color 280ms ease, border-color 280ms ease !important;
+}
+
+/* ── 数据表格（规范 14/14A 章，来自 shared/css/components.css） ── */
+table.data th, table.data td {
+  padding: 10px 12px;
+  font-size: 13px; text-align: left;
+  border-bottom: 1px solid var(--color-border-soft);
+  border-right: 1px solid var(--color-border-soft);
+}
+table.data th:last-child, table.data td:last-child { border-right: 0; }
+table.data thead th {
+  background: var(--color-purple-tint);
+  color: var(--color-heading-accent);
+  font-weight: 700; white-space: nowrap; user-select: none;
+}
+table.data th .th-inner { display: flex; align-items: center; gap: 4px; }
+table.data th.sortable { cursor: pointer; }
+table.data th .sort-btn {
+  display: inline-grid; place-items: center;
+  width: 22px; height: 22px; padding: 0;
+  color: var(--color-text-muted); opacity: .55;
+  background: transparent; border: 0; border-radius: 4px; cursor: pointer;
+}
+table.data th .sort-btn:hover { opacity: 1; color: var(--color-action); }
+table.data th.sorted .sort-btn { opacity: 1; color: var(--color-action); }
+
+/* 列宽手柄（14A.2） */
+.col-resizer {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 8px;
+  cursor: col-resize; touch-action: none;
+}
+.col-resizer::after {
+  content: ""; position: absolute; right: 3px; top: 20%; bottom: 20%; width: 2px;
+  border-radius: 2px; background: transparent;
+  transition: background-color var(--motion-fast) ease;
+}
+th:hover .col-resizer::after, .col-resizer:focus-visible::after, .col-resizer.active::after { background: var(--ale-purple-500); }
+
+/* 分页（14A.4） */
+.pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 12px; }
+.pagination .pg-left { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--color-text-muted); }
+.pagination .pg-left select { min-height: 32px; width: 70px; padding: .2rem .6rem; font-size: 13px; }
+.pagination .pg-right { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; max-width: 100%; } /* wrap：320 下按钮组换行排布，防根级溢出（R10 门禁） */
+.pg-btn {
+  display: inline-grid; place-items: center;
+  min-width: 32px; height: 32px; padding: 0 6px;
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border); border-radius: 6px;
+  font: inherit; font-size: 13px; cursor: pointer;
+  transition: border-color var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+.pg-btn:hover:not(:disabled) { border-color: var(--color-action); color: var(--color-action); }
+.pg-btn[aria-current="page"] { color: var(--color-on-action); background: var(--color-action); border-color: var(--color-action); font-weight: 700; }
+.pg-btn:disabled { opacity: .45; cursor: not-allowed; }
+.pg-ellipsis { padding: 0 4px; color: var(--color-text-muted); font-size: 13px; }
+.table-state { padding: 48px 16px; text-align: center; color: var(--color-text-muted); font-size: 14px; }
+
+/* 表格行 hover / 选中行 */
+tbody tr:hover { background: var(--color-purple-tint); }
+
+/* ── 热区扩展（v5.4 P0-3） ── */
+.sort-btn { position: relative; }
+.sort-btn::before { content: ""; position: absolute; inset: -11px; }
+.pg-btn::before, .icon-btn::before { content: ""; position: absolute; inset: 0; }
+.pg-btn::before { inset: -6px; }
+.icon-btn::before { inset: -2px; }
+table.data input[type="checkbox"], .table-wrap input[type="checkbox"] {
+  appearance: none;
+  width: 16px; height: 16px; margin: 0;
+  border: 1.5px solid var(--color-text-muted);
+  border-radius: 4px;
+  background: var(--color-surface);
+  position: relative; cursor: pointer; vertical-align: middle;
+}
+table.data input[type="checkbox"]::before, .table-wrap input[type="checkbox"]::before {
+  content: ""; position: absolute; inset: -14px;
+}
+table.data input[type="checkbox"]:checked, .table-wrap input[type="checkbox"]:checked {
+  border-color: var(--color-action);
+  background: var(--color-action) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center/12px no-repeat;
+}
+
+/* filler 列：吸收宽度剩余（拖列只动目标列，不拉伸其他列） */
+th.filler, td.filler { width: auto !important; border-right: 0 !important; }

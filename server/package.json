@@ -1,0 +1,13 @@
+{
+  "name": "symphony-console-server",
+  "private": true,
+  "version": "0.1.0",
+  "description": "会议纪要流水线后端：上传 → 抽音轨 → 讯飞转写 → LLM 分析 → ALE 纪要 HTML",
+  "scripts": {
+    "start": "node server.cjs"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}

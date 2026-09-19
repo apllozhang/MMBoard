@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 密钥与敏感配置(绝不入库)
+server/meeting.secret.json
+deploy.secret.json
+
+# 运行时数据(上传文件/任务状态/纪要产物)
+server/data/
+
+# 部署与测试生成物
+deploy/symphony.tgz
+deploy/_upload-test.cjs
+artifacts/
+artifacts-*/
+preview.log
+
+# 测试媒体文件
+test-*.wav
+test-*.mp4
+*.tgz
