@@ -8,9 +8,11 @@ interface DialogProps {
   title: React.ReactNode;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  /** 宽版(设置类弹层) */
+  wide?: boolean;
 }
 
-export function Dialog({ open, onClose, title, children, footer }: DialogProps) {
+export function Dialog({ open, onClose, title, children, footer, wide }: DialogProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
 
@@ -46,7 +48,7 @@ export function Dialog({ open, onClose, title, children, footer }: DialogProps) 
          style={{ background: "rgb(20 14 32 / 50%)" }}
          role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : undefined}
          onMouseDown={(e) => { if (e.target === overlayRef.current) onClose(); }}>
-      <div className={cn("w-full max-w-[460px] rounded-[12px] border border-border bg-surface")} style={{ boxShadow: "var(--shadow-md)" }}>
+      <div className={cn("w-full rounded-[12px] border border-border bg-surface", wide ? "max-w-[720px]" : "max-w-[460px]")} style={{ boxShadow: "var(--shadow-md)" }}>
         <header className="flex items-center justify-between p-4 pb-0">
           <h3 className="m-0 text-base">{title}</h3>
           <button type="button" className="btn btn-secondary btn-sm" onClick={onClose} aria-label="关闭">✕</button>

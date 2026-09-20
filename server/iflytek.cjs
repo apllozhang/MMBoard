@@ -90,6 +90,7 @@ async function transcribe(audioPath, cfg, log = console.log) {
     file_name: path.basename(audioPath),
     slice_num: String(sliceNum),
     language: cfg.language || "cn",     // 中文普通话默认;英文会议可配 "en"
+    roleType: cfg.roleType === false ? "0" : "1",   // 角色分离(现行 API 参数;结果句带 speaker)
   });
   if (prep.ok !== 0) throw new Error(`讯飞 prepare 失败: ${prep.err_no} ${prep.failed ?? ""}`.trim());
   const taskId = prep.data;
@@ -120,9 +121,34 @@ async function transcribe(audioPath, cfg, log = console.log) {
       const r = await postForm("getResult", { app_id: appId, signa, ts, task_id: taskId });
       if (r.ok !== 0) throw new Error(`讯飞 getResult 失败: ${r.err_no} ${r.failed ?? ""}`.trim());
       const rows = typeof r.data === "string" ? JSON.parse(r.data) : r.data;
-      const text = (rows ?? []).map((x) => x.onebest).filter(Boolean).join("\n");
-      if (!text || text.length < 2) throw new Error("讯飞转写结果为空");
-      return { text, mock: false };
+      const segs = (rows ?? [])
+        .filter((x) => x && x.onebest)
+        .map((x) => ({
+          start: Number(x.bg) || 0,
+          end: Number(x.ed) || 0,
+          speaker: String(x.speaker ?? "").trim(),
+          text: String(x.onebest).trim(),
+        }));
+      if (!segs.length) throw new Error("讯飞转写结果为空");
+      const hasSpeakers = segs.some((s) => s.speaker);
+      const fmt = (ms) => {
+        const s = Math.round(ms / 1000);
+        return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+      };
+      // 同一说话人的连续句合并为一行:[MM:SS] 说话人N: 内容;无角色则只带时间戳
+      const lines = [];
+      let last = null;
+      for (const s of segs) {
+        const head = `[${fmt(s.start)}]` + (hasSpeakers ? ` 说话人${s.speaker || "?"}:` : "");
+        if (hasSpeakers && s.speaker && s.speaker === last && lines.length) {
+          lines[lines.length - 1].text += " " + s.text;
+        } else {
+          lines.push({ head, text: s.text });
+        }
+        last = s.speaker;
+      }
+      const text = lines.map((l) => `${l.head} ${l.text}`).join("\n");
+      return { text, segments: segs, hasSpeakers, mock: false };
     }
     if (status === -1) throw new Error("讯飞转写任务失败(status=-1)");
   }

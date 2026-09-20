@@ -79,3 +79,11 @@ export async function restartTask(id: string): Promise<MeetingTask> {
   if (!res.ok) throw new Error(`重跑失败 HTTP ${res.status}`);
   return res.json() as Promise<MeetingTask>;
 }
+
+export async function deleteTask(id: string): Promise<void> {
+  const res = await fetch(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`删除失败 HTTP ${res.status}`);
+}
+
+/** 纪要下载(Attachment,浏览器直接落盘;无需打开新页) */
+export const minutesDownloadUrl = (id: string) => `/api/tasks/${encodeURIComponent(id)}/minutes/download`;

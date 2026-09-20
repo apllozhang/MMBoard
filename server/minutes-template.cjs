@@ -94,6 +94,32 @@ ${(s.items || []).map((it) => `
         </div>`).join("\n")}
       </section>` : "";
 
+  const searchLink = (kw) => kw ? `<a class="ev-link" href="https://www.bing.com/search?q=${encodeURIComponent(kw)}" target="_blank" rel="noreferrer noopener">检索「${esc(kw)}」</a>` : "";
+  const review = ((a.consensus || []).length || (a.doubts || []).length) ? `
+      <section id="review-same-diff" class="sec">
+        <h2 class="section-head">求同存疑 · 客观复盘</h2>
+        <p class="ev-note">客观视角、对事不对人:「求同」列出与行业现状/规则相符、逻辑成立的观点;「存疑」点名待商榷处并附查证方向——检索链接仅为人工核实的入口,结论以核实结果为准。</p>
+        ${(a.consensus || []).length ? `
+        <div class="card">
+          <h3 class="card-head ok">求同 · 已认可的观点</h3>
+          <ul class="list">
+${(a.consensus || []).map((c) => `            <li><b>${esc(c.person)}</b>:${esc(c.viewpoint)}<span class="why"> —— ${esc(c.basis)}</span></li>`).join("\n")}
+          </ul>
+        </div>` : ""}
+        ${(a.doubts || []).length ? `
+        <div class="card">
+          <h3 class="card-head doubt">存疑 · 点名待商榷</h3>
+          <div class="table-wrap">
+            <table class="data">
+              <thead><tr><th scope="col">讲者</th><th scope="col">观点(引用)</th><th scope="col">存疑理由</th><th scope="col">查证入口(需人工核实)</th></tr></thead>
+              <tbody>
+${(a.doubts || []).map((x) => `                <tr><td>${esc(x.person)}</td><td>${esc(x.claim)}</td><td>${esc(x.issue)}</td><td>${x.basis ? `<div class="basis">${esc(x.basis)}</div>` : ""}${x.kw ? searchLink(x.kw) : ""}</td></tr>`).join("\n")}
+              </tbody>
+            </table>
+          </div>
+        </div>` : ""}
+      </section>` : "";
+
   const actionRows = (a.actions || []).map((x) => `
           <tr>
             <td>${esc(x.owner || "—")}</td>
@@ -216,6 +242,17 @@ table.data th,table.data td{padding:10px 12px;border-bottom:1px solid var(--bord
 table.data tr:last-child td{border-bottom:0}
 .table-wrap{overflow-x:auto}
 
+/* 求同存疑 · 客观复盘 */
+.ev-note{margin:0 0 14px;font-size:.86rem;color:var(--text-3)}
+.card-head{margin:0 0 10px;font-size:1rem}
+.card-head.ok{color:var(--info-text)}
+.card-head.doubt{color:var(--warn-text)}
+.list .why{color:var(--text-3);font-size:.92em}
+.basis{margin-bottom:4px;color:var(--text-2)}
+.ev-link{display:inline-block;font-size:.84rem;color:var(--purple);border-bottom:1px dashed var(--purple);text-decoration:none}
+.ev-link:hover{color:var(--purple-deep)}
+html.dark .ev-link{color:var(--purple-40);border-bottom-color:var(--purple-40)}
+
 footer{border-top:1px solid var(--border-soft);margin-top:56px;padding:20px 16px 40px;
   text-align:center;color:var(--text-3);font-size:12px}
 footer .tm{margin:0 0 4px}
@@ -252,7 +289,8 @@ footer .tm{margin:0 0 4px}
   <a href="#strengths">优点分析</a>` : ""}${(a.weaknesses || []).length ? `
   <a href="#weaknesses">缺点复盘</a>` : ""}${(a.comparison || []).length ? `
   <a href="#comparison">对比总览</a>` : ""}${(a.suggestions || []).length ? `
-  <a href="#suggestions">建议</a>` : ""}
+  <a href="#suggestions">建议</a>` : ""}${((a.consensus || []).length || (a.doubts || []).length) ? `
+  <a href="#review-same-diff">求同存疑</a>` : ""}
 </nav>
 
 <div class="hero">
@@ -304,6 +342,7 @@ ${strengths}
 ${weaknesses}
 ${comparison}
 ${suggestions}
+${review}
 </main>
 
 <footer>

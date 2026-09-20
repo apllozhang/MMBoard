@@ -14,11 +14,37 @@ const { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, hasFfmpeg } = requ
 const PORT = process.env.PORT || 8787;
 const DIST = path.join(__dirname, "..", "dist");
 const SECRET_FILE = path.join(__dirname, "meeting.secret.json");
+const SETTINGS_FILE = path.join(__dirname, "data", "settings.json");   // 数据卷持久化
 
+/* ── 设置(模型管理,模仿 ZCode:多条目 + 激活其一 + 连通性测试) ── */
+function loadSettings() {
+  try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); }
+  catch { return { activeId: null, models: [] }; }
+}
+function saveSettings(s) {
+  fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
+}
+function maskKey(k) {
+  const s = String(k || "");
+  if (s.length <= 8) return s ? "********" : "";
+  return s.slice(0, 4) + "****" + s.slice(-4);
+}
+function activeLLM() {
+  const st = loadSettings();
+  const m = (st.models || []).find((x) => x.id === st.activeId);
+  return (m && m.apiKey && m.model && m.baseUrl) ? { provider: m.provider, baseUrl: m.baseUrl, apiKey: m.apiKey, model: m.model } : null;
+}
+/** 生效 LLM 配置:设置里的激活模型优先,回退 meeting.secret.json(兼容既有部署) */
 function loadSecret() {
-  if (!fs.existsSync(SECRET_FILE)) return {};
-  try { return JSON.parse(fs.readFileSync(SECRET_FILE, "utf8")); }
-  catch (e) { console.error("[secret] 解析失败,按未配置处理:", e.message); return {}; }
+  let s = {};
+  if (fs.existsSync(SECRET_FILE)) {
+    try { s = JSON.parse(fs.readFileSync(SECRET_FILE, "utf8")); }
+    catch (e) { console.error("[secret] 解析失败,按未配置处理:", e.message); }
+  }
+  const act = activeLLM();
+  if (act) s.llm = act;
+  return s;
 }
 
 const app = express();
@@ -35,6 +61,88 @@ app.use(express.json());
 /* ── API ── */
 app.get("/api/meta", (_req, res) => {
   res.json({ ffmpeg: hasFfmpeg, iflytekConfigured: !!loadSecret().iflytek?.appId, llmConfigured: !!loadSecret().llm?.apiKey });
+});
+
+/* ── 设置:模型管理 ── */
+app.get("/api/settings", (_req, res) => {
+  const st = loadSettings();
+  const secretLLM = (() => {
+    if (!fs.existsSync(SECRET_FILE)) return null;
+    try { const s = JSON.parse(fs.readFileSync(SECRET_FILE, "utf8")); return s.llm || null; } catch { return null; }
+  })();
+  res.json({
+    activeId: st.activeId || null,
+    models: (st.models || []).map((m) => ({ ...m, apiKey: maskKey(m.apiKey) })),
+    // 尚无设置条目时的现状提示:密钥文件里的 LLM(回退来源)
+    fallback: secretLLM ? { provider: secretLLM.provider || "openai", baseUrl: secretLLM.baseUrl, model: secretLLM.model, apiKey: maskKey(secretLLM.apiKey) } : null,
+  });
+});
+
+app.put("/api/settings", (req, res) => {
+  const body = req.body || {};
+  const prev = loadSettings();
+  const prevById = new Map((prev.models || []).map((m) => [m.id, m]));
+  const models = (Array.isArray(body.models) ? body.models : []).map((m) => {
+    const old = prevById.get(m.id);
+    // apiKey 含 **** 视为未修改,沿用旧值(前端拿到的是打码值)
+    const key = (typeof m.apiKey === "string" && m.apiKey.includes("****") && old) ? old.apiKey : (m.apiKey || "");
+    return {
+      id: String(m.id || `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`),
+      name: String(m.name || "未命名模型").slice(0, 40),
+      provider: m.provider === "anthropic" ? "anthropic" : "openai",
+      baseUrl: String(m.baseUrl || "").trim(),
+      model: String(m.model || "").trim(),
+      apiKey: key,
+    };
+  });
+  const activeId = models.some((m) => m.id === body.activeId) ? body.activeId : (models[0]?.id || null);
+  saveSettings({ activeId, models });
+  res.json({ ok: true, activeId, count: models.length });
+});
+
+app.post("/api/settings/test", async (req, res) => {
+  const body = req.body || {};
+  let cfg = null;
+  if (body.id) {
+    cfg = (loadSettings().models || []).find((m) => m.id === body.id) || null;
+  } else if (body.entry && !String(body.entry.apiKey || "").includes("****")) {
+    cfg = body.entry;    // 表单直测(要求已填明文 key)
+  }
+  if (!cfg || !cfg.baseUrl || !cfg.model || !cfg.apiKey) {
+    return res.status(400).json({ ok: false, message: "配置不完整(需要 baseUrl / model / apiKey;若未修改密钥请使用已保存条目的测试)" });
+  }
+  const base = String(cfg.baseUrl).replace(/\/$/, "");
+  const provider = cfg.provider === "anthropic" ? "anthropic" : "openai";
+  const t0 = Date.now();
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15000);
+    let r;
+    if (provider === "anthropic") {
+      r = await fetch(`${base}/v1/messages`, {
+        method: "POST", signal: ac.signal,
+        headers: { "Content-Type": "application/json", "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: cfg.model, max_tokens: 8, messages: [{ role: "user", content: "ping" }] }),
+      });
+    } else {
+      r = await fetch(`${base}/chat/completions`, {
+        method: "POST", signal: ac.signal,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify({ model: cfg.model, max_tokens: 8, messages: [{ role: "user", content: "ping" }] }),
+      });
+    }
+    clearTimeout(timer);
+    const ms = Date.now() - t0;
+    if (!r.ok) {
+      const text = (await r.text()).slice(0, 200);
+      return res.json({ ok: false, ms, message: `HTTP ${r.status}: ${text}` });
+    }
+    await r.json().catch(() => null);
+    res.json({ ok: true, ms, message: `${provider === "anthropic" ? "Anthropic" : "OpenAI"} 协议连通` });
+  } catch (e) {
+    const ms = Date.now() - t0;
+    res.json({ ok: false, ms, message: e.name === "AbortError" ? "超时(15s)" : String(e.message).slice(0, 160) });
+  }
 });
 
 app.get("/api/tasks", (_req, res) => res.json(loadTasks()));
@@ -61,6 +169,32 @@ app.post("/api/tasks/:id/restart", (req, res) => {
   fs.writeFileSync(path.join(__dirname, "data", "tasks.json"), JSON.stringify(tasks, null, 2));
   runPipeline(t, loadSecret());
   res.json(t);
+});
+
+/* ── 纪要下载(Attachment,文件名用会议标题) ── */
+app.get("/api/tasks/:id/minutes/download", (req, res) => {
+  const t = loadTasks().find((x) => x.id === req.params.id);
+  if (!t || !t.minutesFile) return res.status(404).json({ error: "minutes not found" });
+  const p = path.join(OUTPUTS, t.minutesFile);
+  if (!fs.existsSync(p)) return res.status(404).json({ error: "minutes file missing" });
+  const safeName = String(t.title || t.id).replace(/[\\\/:*?"<>|]/g, "_");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Content-Disposition",
+    `attachment; filename="${t.id}.html"; filename*=UTF-8''${encodeURIComponent(safeName + ".html")}`);
+  fs.createReadStream(p).pipe(res);
+});
+
+/* ── 任务删除(连带纪要产物目录与上传源文件;二次确认由前端承担) ── */
+app.delete("/api/tasks/:id", (req, res) => {
+  const tasks = loadTasks();
+  const i = tasks.findIndex((x) => x.id === req.params.id);
+  if (i < 0) return res.status(404).json({ error: "task not found" });
+  const [t] = tasks.splice(i, 1);
+  fs.writeFileSync(path.join(__dirname, "data", "tasks.json"), JSON.stringify(tasks, null, 2));
+  const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best effort */ } };
+  if (t.minutesFile) rm(path.join(OUTPUTS, t.minutesFile.split("/")[0]));
+  if (t.fileName) rm(path.join(UPLOADS, t.fileName));
+  res.json({ ok: true, id: t.id });
 });
 
 /* ── 纪要产物 ── */

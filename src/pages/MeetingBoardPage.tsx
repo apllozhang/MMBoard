@@ -11,9 +11,10 @@ import { Badge } from "@/components/Badge";
 import { Dialog } from "@/components/Dialog";
 import { VersionBadge } from "@/components/VersionBadge";
 import { ThemeToggle, LangToggle } from "@/components/Toggles";
+import { SettingsButton } from "@/components/ModelSettings";
 import { toast } from "@/lib/toast";
 import {
-  fetchMeta, fetchTasks, restartTask, uploadMeeting,
+  fetchMeta, fetchTasks, restartTask, uploadMeeting, deleteTask, minutesDownloadUrl,
   STAGE_TONE, STEP_TONE, type MeetingTask, type ServerMeta, type Stage,
 } from "@/lib/meeting";
 
@@ -40,6 +41,8 @@ export default function MeetingBoardPage() {
   const [meta, setMeta] = useState<ServerMeta | null>(null);
   const [error, setError] = useState(false);
   const [detail, setDetail] = useState<MeetingTask | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<MeetingTask | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -97,6 +100,22 @@ export default function MeetingBoardPage() {
     }
   };
 
+  const onDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await deleteTask(pendingDelete.id);
+      toast("success", t("board.deleted"));
+      setPendingDelete(null);
+      setDetail(null);
+      load();
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const columns = useMemo<ColumnDef<MeetingTask, any>[]>(() => [
     {
       accessorKey: "id", size: 150,
@@ -127,22 +146,47 @@ export default function MeetingBoardPage() {
       cell: (c) => <span className="whitespace-nowrap text-text-muted">{fmtTime(c.getValue<string>())}</span>,
     },
     {
-      id: "actions", size: 150, enableSorting: false, enableResizing: false,
+      id: "actions", size: 190, enableSorting: false, enableResizing: false,
       header: () => <span className="sr-only">{t("board.col.actions")}</span>,
       cell: (c) => {
         const row = c.row.original;
+        const hasMinutes = row.stage === "done" && row.minutesFile;
         return (
-          <div className="flex gap-1.5">
-            <button type="button" className="btn btn-secondary btn-sm" aria-haspopup="dialog"
+          <div className="flex items-center gap-1.5">
+            <button type="button" className="btn btn-secondary btn-sm whitespace-nowrap" aria-haspopup="dialog"
                     onClick={() => setDetail(row)}>
               {t("board.detail")}
             </button>
-            {row.stage === "done" && row.minutesFile && (
-              <a className="btn btn-primary btn-sm" href={`/outputs/${row.minutesFile}`} target="_blank"
+            {hasMinutes && (
+              <a className="btn btn-primary btn-sm whitespace-nowrap" href={`/outputs/${row.minutesFile}`} target="_blank"
                  rel="noreferrer">
                 {t("board.openMinutes")}
               </a>
             )}
+            {hasMinutes && (
+              <a className="inline-grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[8px] border transition-colors hover:border-[var(--color-action)]"
+                 style={{ borderColor: "var(--color-border)", color: "var(--color-action)" }}
+                 href={minutesDownloadUrl(row.id)} download
+                 title={t("board.download")} aria-label={`${t("board.download")} ${row.id}`}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" x2="12" y1="15" y2="3" />
+                </svg>
+              </a>
+            )}
+            <button type="button"
+                    className="inline-grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[8px] border transition-colors hover:border-[var(--status-danger-graphic)]"
+                    style={{ borderColor: "var(--color-border)", color: "var(--status-danger-text)" }}
+                    title={t("board.delete")} aria-label={`${t("board.delete")} ${row.id}`}
+                    aria-haspopup="dialog" onClick={() => setPendingDelete(row)}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+            </button>
           </div>
         );
       },
@@ -171,6 +215,7 @@ export default function MeetingBoardPage() {
         <>
           <LangToggle />
           <ThemeToggle />
+          <SettingsButton />
         </>
       }
     >
@@ -243,6 +288,32 @@ export default function MeetingBoardPage() {
           initialSort={[{ id: "createdAt", desc: true }]}
         />
       </section>
+
+      {/* 删除二次确认弹层 */}
+      <Dialog open={pendingDelete !== null} onClose={() => (deleting ? undefined : setPendingDelete(null))}
+              title={t("board.deleteTitle")}
+              footer={
+                <>
+                  <button className="btn btn-secondary" disabled={deleting}
+                          onClick={() => setPendingDelete(null)}>{t("table.cancel")}</button>
+                  <button className="btn btn-primary" disabled={deleting}
+                          style={{ background: "var(--status-danger-text)" }}
+                          onClick={onDelete}>
+                    {deleting ? t("board.deleting") : t("board.confirmDelete")}
+                  </button>
+                </>
+              }>
+        {pendingDelete && (
+          <div>
+            <p className="m-0 text-[14px]" style={{ color: "var(--status-danger-text)" }}>
+              {t("board.deleteWarning")}
+            </p>
+            <p className="mt-2 text-[13px] text-text-muted">
+              {t("board.deleteText", { id: pendingDelete.id, title: pendingDelete.title })}
+            </p>
+          </div>
+        )}
+      </Dialog>
 
       {/* 流水线时间线弹层(D1-D5 由 Dialog 组件统一实现) */}
       <Dialog open={detail !== null} onClose={() => setDetail(null)}

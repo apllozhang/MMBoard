@@ -16,6 +16,7 @@ async function analyze(transcript, cfg, log = console.log) {
   }
   const prompt = buildPrompt(transcript);
   const system = "你是专业的会议纪要分析师。只输出 JSON,不要输出任何其他文字。";
+  console.log(`[llm] 模型=${cfg.model} 转写 ${transcript.length} 字 → 提示 ${prompt.length} 字`);
 
   let res, j;
   if (provider === "anthropic") {
@@ -60,9 +61,21 @@ async function analyze(transcript, cfg, log = console.log) {
 }
 
 function buildPrompt(transcript) {
+  // 长会采样:全量 ≤ LIMIT 直接用;超限保留【开头(议程/背景)+结尾(决议/行动项)】,中段按整行略去
+  const LIMIT = 42000, HEAD = 34000, TAIL = 6000;
+  let input = transcript;
+  let truncated = false;
+  if (transcript.length > LIMIT) {
+    truncated = true;
+    const headCut = (n) => { const k = transcript.indexOf("\n", n); return k > 0 ? transcript.slice(0, k) : transcript.slice(0, n); };
+    const tailCut = (n) => { const k = transcript.lastIndexOf("\n", transcript.length - n); return k > 0 ? transcript.slice(k + 1) : transcript.slice(-n); };
+    input = headCut(HEAD) + "\n[……中段讨论内容较长,此处省略……]\n" + tailCut(TAIL);
+  }
   return `请把以下会议转写整理成深度结构化纪要,严格只输出一个 JSON(不要任何其他文字)。
+转写为逐句文本,每行格式:「[MM:SS] 说话人N: 内容」(N 是讯飞角色分离的编号,不一定对应真实姓名)。
 结构分两大部分:「记录」(必有)与「点评」(内容支撑得起才输出,支撑不起则对应字段给空数组)。
-所有分析必须引用转写里的真实细节(可用「」引用原话),禁止编造。字段全部保留:
+所有分析必须引用转写里的真实细节(可用「」引用原话),禁止编造。person 字段优先用转写中出现的真实姓名
+(能从上下文判断说话人N是谁时),否则保留「说话人N」。字段全部保留:
 
 {
   "title": "会议标题(≤20字)",
@@ -75,11 +88,14 @@ function buildPrompt(transcript) {
   "strengths": [{ "person": "讲者/部门名", "items": [{ "title": "维度名(如 能力拆分/实用价值/高光环节)", "detail": "具体分析,2-3句" }] }],
   "weaknesses": [{ "person": "讲者/部门名", "items": ["1. 缺点,一句概括+具体依据(重点:客观、可执行)"] }],
   "comparison": [{ "dimension": "对比维度(如 最有故事感)", "best": "表现最佳者", "reason": "理由一句话" }],
-  "suggestions": [{ "person": "对象", "items": [{ "title": "建议/改稿方案名", "detail": "可执行做法,含时间/步骤则写明" }] }]
+  "suggestions": [{ "person": "对象", "items": [{ "title": "建议/改稿方案名", "detail": "可执行做法,含时间/步骤则写明" }] }],
+  "consensus": [{ "person": "讲者", "viewpoint": "被认可的观点(引用原话或精确概括)", "basis": "认可理由:符合行业现状/主流实践/公开标准的哪一点" }],
+  "doubts": [{ "person": "讲者", "claim": "存疑观点(引用原话)", "issue": "存疑/不合理之处,客观对事不对人", "basis": "查证方向(如 IEEE 802.1Q、厂商官方文档名、知名行业报告),无把握写空串", "kw": "检索关键词 2-4 个" }]
 }
-
+「求同存疑」纪律(最高优先):① consensus 只列确有行业现状/主流实践/公开标准支撑的观点,严禁客套式表扬;② doubts 只在存在具体理由(与主流实践/公开标准/已知事实相悖,或逻辑跳跃、证据不足)时列出,必须点名到人并引用原话,绝不硬凑;③ **绝不生成任何 URL/链接**——查证方向只写来源名称,检索关键词会由系统渲染为搜索入口,由人工核实;④ 若所有观点确凿无疑,doubts 诚实地给空数组。
+${truncated ? "注意:转写较长,中段已省略,请基于保留内容分析,不要臆测被省略部分。\n" : ""}
 会议转写:
-${transcript.slice(0, 24000)}`;
+${input}`;
 }
 
 /** 宽容解析:模型偶尔包 ```json 围栏 */
