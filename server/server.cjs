@@ -207,6 +207,20 @@ app.post("/api/settings/test", async (req, res) => {
   }
 });
 
+/* ── 转写通道轻量切换(看板快捷开关用;只动 asr,不碰模型列表) ── */
+app.put("/api/settings/asr", (req, res) => {
+  const st = loadSettings();
+  const body = req.body || {};
+  if (body.provider) {
+    st.asr = { ...(st.asr || { localUrl: "" }), provider: body.provider === "local" ? "local" : "iflytek" };
+  }
+  if (typeof body.localUrl === "string") {
+    st.asr = { ...(st.asr || { provider: "iflytek" }), localUrl: body.localUrl.trim() };
+  }
+  saveSettings(st);
+  res.json({ ok: true, asr: st.asr });
+});
+
 /* ── 转写通道测试:探测本地 FunASR 服务 ── */
 app.post("/api/settings/test-asr", async (req, res) => {
   const localUrl = String(req.body?.localUrl || "").trim();

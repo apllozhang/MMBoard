@@ -117,5 +117,35 @@ export async function fetchRerunPreview(id: string): Promise<RerunPreview> {
   return res.json() as Promise<RerunPreview>;
 }
 
+/** 转写通道轻量切换(看板快捷开关;只动 asr,不碰模型列表) */
+export async function patchAsrProvider(provider: "iflytek" | "local") {
+  const res = await fetch("/api/settings/asr", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json() as Promise<{ ok: boolean; asr: { provider: string; localUrl: string } }>;
+}
+
+/* ── 流水线进度估算 ──
+ * 步骤权重(转写/分析占大头);运行中步骤按已耗时/预计耗时推进,封顶 90% 等真实完成 */
+const STEP_WEIGHT: Record<Step["key"], number> = { import: 3, extract: 7, transcribe: 60, analyze: 25, render: 5 };
+const STEP_EST_SEC: Record<Step["key"], number> = { import: 5, extract: 30, transcribe: 240, analyze: 180, render: 10 };
+
+export function taskProgress(t: MeetingTask): { pct: number; running: boolean } {
+  if (t.stage === "done") return { pct: 100, running: false };
+  let pct = t.stage === "queued" ? 1 : 0;
+  const now = Date.now();
+  for (const s of t.steps) {
+    if (s.status === "done" || s.status === "skipped") pct += STEP_WEIGHT[s.key];
+    else if (s.status === "running" && s.startedAt) {
+      const frac = Math.min(0.9, (now - new Date(s.startedAt).getTime()) / (STEP_EST_SEC[s.key] * 1000));
+      pct += STEP_WEIGHT[s.key] * frac;
+    }
+  }
+  return { pct: Math.min(99, Math.round(pct)), running: t.stage !== "failed" };
+}
+
 /** 纪要下载(Attachment,浏览器直接落盘;无需打开新页) */
 export const minutesDownloadUrl = (id: string) => `/api/tasks/${encodeURIComponent(id)}/minutes/download`;

@@ -15,6 +15,7 @@ import { SettingsButton } from "@/components/ModelSettings";
 import { toast } from "@/lib/toast";
 import {
   fetchMeta, fetchTasks, restartTask, uploadMeeting, deleteTask, minutesDownloadUrl, fetchRerunPreview,
+  patchAsrProvider, taskProgress,
   STAGE_TONE, STEP_TONE, type MeetingTask, type ServerMeta, type Stage, type RerunPreview,
 } from "@/lib/meeting";
 
@@ -127,6 +128,76 @@ export default function MeetingBoardPage() {
     return m > 0 ? t("board.durMinSec", { m, s: sec }) : t("board.durSec", { s: sec });
   };
 
+  /** 看板快捷切换转写通道(设置页里仍可配置本地服务地址) */
+  const [switchingAsr, setSwitchingAsr] = useState(false);
+  const onSwitchAsr = async (p: "iflytek" | "local") => {
+    if (meta?.asrProvider === p || switchingAsr) return;
+    setSwitchingAsr(true);
+    try {
+      await patchAsrProvider(p);
+      toast("success", p === "local" ? t("board.asrSwitchedLocal") : t("board.asrSwitchedIflytek"));
+      fetchMeta().then(setMeta).catch(() => undefined);
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setSwitchingAsr(false);
+    }
+  };
+
+  /** 转写通道分段切换控件(当前通道高亮;本地离线时带警示点) */
+  const asrSwitch = meta && (
+    <div className="inline-flex items-center gap-2">
+      <div role="group" aria-label={t("board.asrSwitch")}
+           className="inline-flex overflow-hidden rounded-full border" style={{ borderColor: "var(--color-border)" }}>
+        {([["iflytek", t("board.asrIflytekShort")], ["local", t("board.asrLocalShort")]] as const).map(([v, label]) => {
+          const active = meta.asrProvider === v;
+          return (
+            <button key={v} type="button" disabled={switchingAsr}
+                    aria-pressed={active}
+                    title={v === "local" && meta.localAsrOnline === false ? t("board.asrLocalOff") : undefined}
+                    onClick={() => onSwitchAsr(v)}
+                    className="relative px-3 py-1 text-xs font-semibold transition-colors"
+                    style={active
+                      ? { background: "var(--color-action)", color: "#fff" }
+                      : { background: "transparent", color: "var(--color-text-secondary)" }}>
+              {v === "local" && meta.localAsrOnline === false && (
+                <span aria-hidden="true" className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full"
+                      style={{ background: "var(--status-warning-text)" }} />
+              )}
+              {label}
+            </button>
+          );
+        })}
+      </div>
+      {meta.asrProvider === "local" && (
+        <span className="text-xs font-semibold"
+              style={{ color: meta.localAsrOnline ? "var(--status-success-text)" : "var(--status-warning-text)" }}>
+          {meta.localAsrOnline ? t("board.asrLocalOn") : t("board.asrLocalOff")}
+        </span>
+      )}
+    </div>
+  );
+
+  /** 任务进度条(百分比 + 当前阶段;失败红条停在已完成处) */
+  const progressBar = (row: MeetingTask) => {
+    const { pct, running } = taskProgress(row);
+    const failed = row.stage === "failed";
+    return (
+      <div className="flex items-center gap-2" aria-label={`${t("board.col.progress")} ${pct}%`}>
+        <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full" style={{ background: "var(--color-border-soft)" }}>
+          <div className="h-full rounded-full transition-all duration-500"
+               style={{ width: `${pct}%`,
+                        background: failed ? "var(--status-danger-text)" : "var(--color-action)" }} />
+        </div>
+        <span className="w-9 shrink-0 text-right text-xs tabular-nums"
+              style={{ color: failed ? "var(--status-danger-text)" : "var(--color-text-secondary)" }}>
+          {failed ? t("stage.failed") : `${pct}%`}
+        </span>
+        <span className="sr-only">{running ? t(`stage.${row.stage}`) : ""}</span>
+      </div>
+    );
+  };
+
   const onDelete = async () => {
     if (!pendingDelete) return;
     setDeleting(true);
@@ -161,6 +232,11 @@ export default function MeetingBoardPage() {
         const s = c.getValue<Stage>();
         return <Badge tone={STAGE_TONE[s]}>{t(`stage.${s}`)}</Badge>;
       },
+    },
+    {
+      id: "progress", size: 160, enableSorting: false,
+      header: () => t("board.col.progress"),
+      cell: (c) => progressBar(c.row.original),
     },
     {
       accessorKey: "transcriptChars", size: 110,
@@ -286,10 +362,8 @@ export default function MeetingBoardPage() {
           </div>
         </div>
         {meta && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {meta.asrProvider === "local"
-              ? metaBadge(meta.localAsrOnline === true, t("board.asrLocalOn"), t("board.asrLocalOff"))
-              : metaBadge(meta.iflytekConfigured, t("board.asrOn"), t("board.asrOff"))}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {asrSwitch}
             {metaBadge(meta.llmConfigured, t("board.llmOn"), t("board.llmOff"))}
             {metaBadge(meta.ffmpeg, t("board.ffmpegOn"), t("board.ffmpegOff"))}
           </div>
@@ -367,6 +441,17 @@ export default function MeetingBoardPage() {
               }>
         {detail && (
           <div>
+            <div className="mb-2 flex items-center gap-2">
+              <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full" style={{ background: "var(--color-border-soft)" }}>
+                <div className="h-full rounded-full transition-all duration-500"
+                     style={{ width: `${taskProgress(detail).pct}%`,
+                              background: detail.stage === "failed" ? "var(--status-danger-text)" : "var(--color-action)" }} />
+              </div>
+              <span className="text-xs font-semibold tabular-nums"
+                    style={{ color: detail.stage === "failed" ? "var(--status-danger-text)" : "var(--color-action)" }}>
+                {detail.stage === "failed" ? t("stage.failed") : `${taskProgress(detail).pct}%`}
+              </span>
+            </div>
             <ol className="m-0 flex list-none flex-col gap-0 p-0">
               {detail.steps.map((s, i) => (
                 <li key={s.key} className="flex gap-3 py-2"
