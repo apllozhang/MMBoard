@@ -3,8 +3,33 @@
  * 智谱 GLM / DeepSeek / 通义 / 本地 vLLM/Ollama(OpenAI 兼容端点)通吃:
  * 配置 meeting.secret.json → llm: { baseUrl, apiKey, model },无配置走 mock。
  * 输出统一为结构化 JSON(纪要骨架),失败时抛错由流水线标记 failed。
+ * ⚠ 用原生 https 而非 fetch:undici 默认 300s 等不到响应头就掐连接(fetch failed),
+ *   大输入+长生成(34000 字→16384 tokens)会稳挂;原生 socket 空闲超时自控 20 分钟。
  */
 "use strict";
+const https = require("https");
+const http = require("http");
+
+/** POST JSON,空闲超时默认 20 分钟,返回 {status, text} */
+function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const mod = u.protocol === "http:" ? http : https;
+    const body = Buffer.from(JSON.stringify(bodyObj), "utf8");
+    const req = mod.request(u, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json", "Content-Length": body.length },
+      timeout: timeoutMs,
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("timeout", () => req.destroy(new Error(`LLM 请求空闲超时(${Math.round(timeoutMs / 60000)} 分钟无数据)`)));
+    req.on("error", reject);
+    req.end(body);
+  });
+}
 
 /** 分析转写文本 → 结构化纪要数据(双协议:anthropic Messages / openai chat.completions) */
 async function analyze(transcript, cfg, log = console.log) {
@@ -21,43 +46,36 @@ async function analyze(transcript, cfg, log = console.log) {
   let res, j;
   if (provider === "anthropic") {
     // Anthropic Messages 协议(智谱 anthropic 兼容端点等)
-    res = await fetch(`${cfg.baseUrl.replace(/\/$/, "")}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": cfg.apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: cfg.model,
-        max_tokens: 16384,   // 求同存疑等章节加入后,8192 会被截断(无闭合括号)
-        system,
-        messages: [{ role: "user", content: prompt }],
-      }),
+    res = await postJson(`${cfg.baseUrl.replace(/\/$/, "")}/v1/messages`, {
+      "x-api-key": cfg.apiKey,
+      "anthropic-version": "2023-06-01",
+    }, {
+      model: cfg.model,
+      max_tokens: 16384,   // 求同存疑等章节加入后,8192 会被截断(无闭合括号)
+      system,
+      messages: [{ role: "user", content: prompt }],
     });
-    if (!res.ok) throw new Error(`LLM API HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    j = await res.json();
+    if (res.status < 200 || res.status >= 300) throw new Error(`LLM API HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+    j = JSON.parse(res.text);
     const content = (j.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("");
     console.log(`[llm] 响应 ${content.length} 字 stop=${j.stop_reason ?? "-"}`);
     return { ...extractJson(content), mock: false };
   }
 
   // OpenAI 兼容协议
-  res = await fetch(`${cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify({
-      model: cfg.model,
-      max_tokens: 16384,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.3,
-    }),
+  res = await postJson(`${cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    Authorization: `Bearer ${cfg.apiKey}`,
+  }, {
+    model: cfg.model,
+    max_tokens: 16384,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.3,
   });
-  if (!res.ok) throw new Error(`LLM API HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  j = await res.json();
+  if (res.status < 200 || res.status >= 300) throw new Error(`LLM API HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+  j = JSON.parse(res.text);
   const content = j.choices?.[0]?.message?.content ?? "";
   console.log(`[llm] 响应 ${content.length} 字 stop=${j.choices?.[0]?.finish_reason ?? "-"}`);
   return { ...extractJson(content), mock: false };
