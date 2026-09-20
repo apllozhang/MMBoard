@@ -11,6 +11,15 @@ const fs = require("fs");
 const path = require("path");
 const { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, hasFfmpeg } = require("./pipeline.cjs");
 
+/** 任务附加运行时可用性:转写文本已落盘(可只重跑分析)/ 源文件还在(可整条重跑) */
+function decorateTask(t) {
+  return {
+    ...t,
+    hasTranscript: fs.existsSync(path.join(OUTPUTS, t.id, "transcript.json")),
+    hasSource: !!t.fileName && fs.existsSync(path.join(UPLOADS, t.fileName)),
+  };
+}
+
 const PORT = process.env.PORT || 8787;
 const DIST = path.join(__dirname, "..", "dist");
 const SECRET_FILE = path.join(__dirname, "meeting.secret.json");
@@ -155,11 +164,11 @@ app.post("/api/settings/test", async (req, res) => {
   }
 });
 
-app.get("/api/tasks", (_req, res) => res.json(loadTasks()));
+app.get("/api/tasks", (_req, res) => res.json(loadTasks().map(decorateTask)));
 
 app.get("/api/tasks/:id", (req, res) => {
   const t = loadTasks().find((x) => x.id === req.params.id);
-  t ? res.json(t) : res.status(404).json({ error: "task not found" });
+  t ? res.json(decorateTask(t)) : res.status(404).json({ error: "task not found" });
 });
 
 app.post("/api/tasks", upload.single("file"), (req, res) => {
@@ -169,15 +178,32 @@ app.post("/api/tasks", upload.single("file"), (req, res) => {
   res.status(201).json(task);
 });
 
+/* scope=analyze:复用已落盘转写文本,只重跑 AI 分析+生成纪要(不耗讯飞额度)
+   scope=all(默认):整条重跑(重新转写) */
 app.post("/api/tasks/:id/restart", (req, res) => {
   const tasks = loadTasks();
   const t = tasks.find((x) => x.id === req.params.id);
   if (!t) return res.status(404).json({ error: "task not found" });
+  const scope = req.body?.scope === "analyze" ? "analyze" : "all";
+
+  let transcript = null;
+  if (scope === "analyze") {
+    const tp = path.join(OUTPUTS, t.id, "transcript.json");
+    if (!fs.existsSync(tp)) {
+      return res.status(400).json({ error: "该任务没有已保存的转写文本,请用「整条重跑」" });
+    }
+    try { transcript = JSON.parse(fs.readFileSync(tp, "utf8")); }
+    catch { return res.status(500).json({ error: "转写文本读取失败,请用「整条重跑」" }); }
+    if (!transcript || !transcript.text || String(transcript.text).length < 10) {
+      return res.status(400).json({ error: "已存转写文本为空,请用「整条重跑」" });
+    }
+  }
+
   t.steps.forEach((s) => { s.status = "pending"; s.note = ""; s.startedAt = null; s.finishedAt = null; });
   t.stage = "queued";
   t.error = "";
   fs.writeFileSync(path.join(__dirname, "data", "tasks.json"), JSON.stringify(tasks, null, 2));
-  runPipeline(t, loadSecret());
+  runPipeline(t, loadSecret(), transcript ? { transcript } : {});
   res.json(t);
 });
 

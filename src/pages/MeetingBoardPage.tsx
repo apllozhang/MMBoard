@@ -89,12 +89,15 @@ export default function MeetingBoardPage() {
     };
   }, [tasks]);
 
-  const onRestart = async (id: string) => {
+  const onRestart = async (id: string, scope: "analyze" | "all" = "all") => {
     try {
-      await restartTask(id);
+      await restartTask(id, scope);
       toast("success", t("board.restarted"));
       setDetail(null);
       load();
+      // 重跑期间快轮询,让进度尽快可见
+      let n = 0;
+      const fast = window.setInterval(() => { load(); if (++n >= 15) window.clearInterval(fast); }, 2000);
     } catch (e) {
       toast("error", (e as Error).message);
     }
@@ -321,8 +324,18 @@ export default function MeetingBoardPage() {
               footer={
                 <>
                   <button className="btn btn-secondary" onClick={() => setDetail(null)}>{t("table.cancel")}</button>
-                  {detail && detail.stage === "failed" && (
-                    <button className="btn btn-primary" onClick={() => onRestart(detail.id)}>{t("board.restart")}</button>
+                  {detail && (detail.stage === "done" || detail.stage === "failed") && detail.hasSource !== false && (
+                    <button className={`btn ${detail.hasTranscript ? "btn-secondary" : "btn-primary"}`}
+                            title={t("board.rerunAllTip")}
+                            onClick={() => onRestart(detail.id, "all")}>
+                      {t("board.rerunAll")}
+                    </button>
+                  )}
+                  {detail && (detail.stage === "done" || detail.stage === "failed") && detail.hasTranscript && (
+                    <button className="btn btn-primary" title={t("board.rerunAnalyzeTip")}
+                            onClick={() => onRestart(detail.id, "analyze")}>
+                      {t("board.rerunAnalyze")}
+                    </button>
                   )}
                 </>
               }>

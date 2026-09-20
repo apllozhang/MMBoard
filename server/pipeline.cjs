@@ -83,9 +83,34 @@ function setStep(taskId, key, status, note = "") {
 
 const STAGE_OF = { extract: "extracting", transcribe: "transcribing", analyze: "analyzing", render: "rendering" };
 
-/** 异步执行流水线(不阻塞 HTTP) */
-async function runPipeline(task, secret) {
+/** 异步执行流水线(不阻塞 HTTP)。opts.transcript 存在时复用已存转写文本,跳过 extract/transcribe(不耗讯飞额度) */
+async function runPipeline(task, secret, opts = {}) {
   const log = (...a) => console.log(`[${task.id}]`, ...a);
+  try {
+    let text, segments = null, hasSpeakers = false;
+
+    if (opts.transcript) {
+      /* ── 复用已有转写(import/extract/transcribe 不重跑) ── */
+      text = String(opts.transcript.text || "");
+      segments = Array.isArray(opts.transcript.segments) ? opts.transcript.segments : null;
+      hasSpeakers = !!opts.transcript.hasSpeakers;
+      if (text.length < 10) throw new Error("已存转写文本为空或过短,请整条重跑");
+      setStep(task.id, "import", "done", "复用已上传文件");
+      setStep(task.id, "extract", "skipped", "复用已有转写文本");
+      setStep(task.id, "transcribe", "skipped", `复用已有转写(${text.length} 字,未调用讯飞)`);
+    } else {
+      await runFromExtract(task, secret, log);
+      return;
+    }
+
+    await analyzeAndRender(task, secret, log, { text, segments, hasSpeakers });
+  } catch (e) {
+    failTask(task, e);
+  }
+}
+
+/** extract + transcribe 段(整条跑时执行) */
+async function runFromExtract(task, secret, log) {
   try {
     const srcPath = path.join(UPLOADS, task.fileName);
     const ext = path.extname(task.fileName).toLowerCase();
@@ -123,6 +148,24 @@ async function runPipeline(task, secret) {
     setStep(task.id, "transcribe", "done", `${text.length} 字${trMock ? "(mock)" : ""}`);
     updateTask(task.id, { transcriptChars: text.length });
 
+    /* 转写落盘:后续"重跑分析"可复用,不必重新转写(省讯飞额度) */
+    try {
+      const outDir = path.join(OUTPUTS, task.id);
+      fs.mkdirSync(outDir, { recursive: true });
+      fs.writeFileSync(path.join(outDir, "transcript.json"),
+        JSON.stringify({ text, segments: segments || [], hasSpeakers: !!hasSpeakers }, null, 2));
+    } catch (e) { log("转写文本落盘失败(不影响本次任务):", e.message); }
+
+    await analyzeAndRender(task, secret, log, { text, segments, hasSpeakers });
+  } catch (e) {
+    failTask(task, e);
+  }
+}
+
+/** analyze + render 段(两种入口共用) */
+async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers }) {
+  try {
+
     /* 说话人发言时长统计(真实数据:来自讯飞时间戳分段) */
     let talkStats = [];
     if (segments && segments.length && hasSpeakers) {
@@ -157,21 +200,25 @@ async function runPipeline(task, secret) {
     updateTask(task.id, { stage: "done", title: analysis.title || task.title, minutesFile: `${task.id}/${fileName}` });
     log("流水线完成 →", fileName);
   } catch (e) {
-    console.error(`[${task.id}] 失败:`, e.message);
-    // 失败发生在哪一步,就把哪一步标 failed(此刻它正处于 running)
-    const tasks = loadTasks();
-    const t = tasks.find((x) => x.id === task.id);
-    if (t) {
-      const cur = t.steps.find((s) => s.status === "running");
-      if (cur) {
-        cur.status = "failed";
-        cur.note = e.message.slice(0, 200);
-        cur.finishedAt = new Date().toISOString();
-      }
-      saveTasks(tasks);
-    }
-    updateTask(task.id, { stage: "failed", error: e.message });
+    failTask(task, e);
   }
+}
+
+/** 失败收尾:失败发生在哪一步,就把哪一步标 failed(此刻它正处于 running) */
+function failTask(task, e) {
+  console.error(`[${task.id}] 失败:`, e.message);
+  const tasks = loadTasks();
+  const t = tasks.find((x) => x.id === task.id);
+  if (t) {
+    const cur = t.steps.find((s) => s.status === "running");
+    if (cur) {
+      cur.status = "failed";
+      cur.note = e.message.slice(0, 200);
+      cur.finishedAt = new Date().toISOString();
+    }
+    saveTasks(tasks);
+  }
+  updateTask(task.id, { stage: "failed", error: e.message });
 }
 
 module.exports = { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg };

@@ -29,6 +29,8 @@ export interface MeetingTask {
   error: string;
   createdAt: string;
   updatedAt: string;
+  hasTranscript?: boolean;    // 转写文本已落盘(可只重跑分析)
+  hasSource?: boolean;        // 源文件还在(可整条重跑)
 }
 
 export interface ServerMeta {
@@ -74,9 +76,17 @@ export async function uploadMeeting(file: File): Promise<MeetingTask> {
   return res.json() as Promise<MeetingTask>;
 }
 
-export async function restartTask(id: string): Promise<MeetingTask> {
-  const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/restart`, { method: "POST" });
-  if (!res.ok) throw new Error(`重跑失败 HTTP ${res.status}`);
+export async function restartTask(id: string, scope: "analyze" | "all" = "all"): Promise<MeetingTask> {
+  const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope }),
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
   return res.json() as Promise<MeetingTask>;
 }
 
