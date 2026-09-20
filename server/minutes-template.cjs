@@ -226,9 +226,10 @@ nav.toc a{color:var(--text-2);text-decoration:none;min-height:44px;display:inlin
 nav.toc a:hover{color:var(--purple)}
 nav.toc a[aria-current="true"]{color:var(--purple);font-weight:700}
 
-.hero{background:linear-gradient(135deg,var(--purple-deep),var(--purple) 55%,var(--purple-500));
-  color:#fff;padding:48px 16px}
-.hero .wrap{max-width:960px;margin:0 auto}
+.hero{position:relative;overflow:hidden;background:linear-gradient(135deg,var(--purple-deep),var(--purple) 55%,var(--purple-500));
+  color:#fff;padding:48px 16px 96px}
+.hero .wrap{max-width:960px;margin:0 auto;position:relative;z-index:2}
+.hero .wave{position:absolute;right:0;bottom:-2px;left:0;width:100%;height:90px;fill:var(--canvas)}
 .hero h1{margin:0 0 8px;font-size:32px;line-height:1.2}
 .hero p{margin:0;opacity:.92;font-size:15px}
 .hero .meta{margin-top:16px;display:flex;flex-wrap:wrap;gap:6px 20px;font-size:13px;opacity:.85}
@@ -343,6 +344,7 @@ footer .tm{margin:0 0 4px}
       <span>转写:${esc(String(meta.transcriptChars))} 字</span>
     </div>
   </div>
+  <svg class="wave" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true"><path d="M0 50 C240 90 480 20 720 40 C960 60 1200 90 1440 50 L1440 90 L0 90 Z"/></svg>
 </div>
 
 <main>
