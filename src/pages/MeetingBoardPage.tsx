@@ -14,10 +14,11 @@ import { ThemeToggle, LangToggle } from "@/components/Toggles";
 import { SettingsButton } from "@/components/ModelSettings";
 import { toast } from "@/lib/toast";
 import {
-  fetchMeta, fetchTasks, restartTask, uploadMeeting, deleteTask, minutesDownloadUrl, fetchRerunPreview,
+  fetchMeta, fetchTasks, restartTask, uploadMeeting, deleteTask, minutesDownloadUrl, minutesOpenUrl, fetchRerunPreview,
   patchAsrProvider, taskProgress,
   STAGE_TONE, STEP_TONE, type MeetingTask, type ServerMeta, type Stage, type RerunPreview,
 } from "@/lib/meeting";
+import { LogoutButton } from "@/components/AuthGate";
 
 const STAGES: Stage[] = ["queued", "extracting", "transcribing", "analyzing", "rendering", "done", "failed"];
 
@@ -261,7 +262,7 @@ export default function MeetingBoardPage() {
               {t("board.detail")}
             </button>
             {hasMinutes && (
-              <a className="btn btn-primary btn-sm whitespace-nowrap" href={`/outputs/${row.minutesFile}`} target="_blank"
+              <a className="btn btn-primary btn-sm whitespace-nowrap" href={minutesOpenUrl(row.id)} target="_blank"
                  rel="noreferrer">
                 {t("board.openMinutes")}
               </a>
@@ -319,6 +320,7 @@ export default function MeetingBoardPage() {
           <LangToggle />
           <ThemeToggle />
           <SettingsButton />
+          <LogoutButton />
         </>
       }
     >

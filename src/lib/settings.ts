@@ -33,9 +33,13 @@ export interface TestResult {
 
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/json" },
     ...init,
   });
+  if (res.status === 401) {
+    window.location.reload();
+    throw new Error("unauthenticated");
+  }
   if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
   return res.json() as Promise<T>;
 }

@@ -60,8 +60,27 @@ export const STEP_TONE: Record<StepStatus, "neutral" | "info" | "success" | "war
   failed: "danger",
 };
 
+/** 401 = 会话过期:整页重载回登录门 */
+function handle401(res: Response) {
+  if (res.status === 401) {
+    window.location.reload();
+    throw new Error("unauthenticated");
+  }
+}
+
+/** 非 GET 的 /api 请求必须带此头(服务端 CSRF 防护) */
+const CSRF = { "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/json" };
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: { Accept: "application/json" } });
+  handle401(res);
+  if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+  return res.json() as Promise<T>;
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, { method: "POST", headers: CSRF, body: JSON.stringify(body) });
+  handle401(res);
   if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
   return res.json() as Promise<T>;
 }
@@ -73,7 +92,8 @@ export const fetchTask = (id: string) => getJson<MeetingTask>(`/api/tasks/${enco
 export async function uploadMeeting(file: File): Promise<MeetingTask> {
   const body = new FormData();
   body.append("file", file);
-  const res = await fetch("/api/tasks", { method: "POST", body });
+  const res = await fetch("/api/tasks", { method: "POST", body, headers: { "X-Requested-With": "XMLHttpRequest" } });
+  handle401(res);
   if (!res.ok) throw new Error(`上传失败 HTTP ${res.status}`);
   return res.json() as Promise<MeetingTask>;
 }
@@ -81,9 +101,10 @@ export async function uploadMeeting(file: File): Promise<MeetingTask> {
 export async function restartTask(id: string, scope: "analyze" | "all" = "all"): Promise<MeetingTask> {
   const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/restart`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: CSRF,
     body: JSON.stringify({ scope }),
   });
+  handle401(res);
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
     try { msg = (await res.json()).error || msg; } catch { /* ignore */ }
@@ -93,7 +114,11 @@ export async function restartTask(id: string, scope: "analyze" | "all" = "all"):
 }
 
 export async function deleteTask(id: string): Promise<void> {
-  const res = await fetch(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const res = await fetch(`/api/tasks/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { "X-Requested-With": "XMLHttpRequest" },
+  });
+  handle401(res);
   if (!res.ok) throw new Error(`删除失败 HTTP ${res.status}`);
 }
 
@@ -111,6 +136,7 @@ export interface RerunPreview {
 
 export async function fetchRerunPreview(id: string): Promise<RerunPreview> {
   const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/rerun-preview`);
+  handle401(res);
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
     try { msg = (await res.json()).error || msg; } catch { /* ignore */ }
@@ -123,9 +149,10 @@ export async function fetchRerunPreview(id: string): Promise<RerunPreview> {
 export async function patchAsrProvider(provider: "iflytek" | "local") {
   const res = await fetch("/api/settings/asr", {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: CSRF,
     body: JSON.stringify({ provider }),
   });
+  handle401(res);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json() as Promise<{ ok: boolean; asr: { provider: string; localUrl: string } }>;
 }
@@ -151,3 +178,5 @@ export function taskProgress(t: MeetingTask): { pct: number; running: boolean } 
 
 /** 纪要下载(Attachment,浏览器直接落盘;无需打开新页) */
 export const minutesDownloadUrl = (id: string) => `/api/tasks/${encodeURIComponent(id)}/minutes/download`;
+/** 纪要在线查看(R04:受认证保护,不再走静态 /outputs) */
+export const minutesOpenUrl = (id: string) => `/api/tasks/${encodeURIComponent(id)}/minutes`;

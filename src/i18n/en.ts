@@ -1,5 +1,14 @@
 export const en = {
-  app: { title: "Meeting Minutes Board", nav: "Main navigation", theme: "Toggle light/dark theme", lang: "Switch language" },
+  app: { title: "Meeting Minutes Board", nav: "Main navigation", theme: "Toggle light/dark theme", lang: "Switch language", logout: "Log out" },
+  auth: {
+    loginTitle: "Sign in · Meeting Minutes Board",
+    loginDesc: "Sign in to view and upload meeting minutes.",
+    username: "Username",
+    password: "Password",
+    submit: "Sign in",
+    submitting: "Signing in…",
+    error: "Sign-in failed — check your username and password",
+  },
   nav: { board: "Board" },
   board: {
     title: "Meeting Minutes Board",
@@ -108,6 +117,12 @@ export const en = {
     asrLocalUrl: "Local service URL",
     asrSaveTest: "Save & test",
     asrLocalNote: "If offline, start D:\\Tools\\local-asr\\start.bat on the workstation",
+    pwTitle: "Change login password",
+    pwOld: "Current password",
+    pwNew: "New password (min 8 chars)",
+    pwChange: "Change password",
+    pwChanged: "Password changed — other sessions invalidated",
+    pwFailed: "Change failed",
   },
   stage: {
     queued: "Queued",

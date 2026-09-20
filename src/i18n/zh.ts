@@ -1,5 +1,14 @@
 export const zh = {
-  app: { title: "会议纪要看板", nav: "主导航", theme: "切换亮色/暗色主题", lang: "切换语言" },
+  app: { title: "会议纪要看板", nav: "主导航", theme: "切换亮色/暗色主题", lang: "切换语言", logout: "退出登录" },
+  auth: {
+    loginTitle: "登录 · 会议纪要看板",
+    loginDesc: "查看与上传会议纪要需要登录。",
+    username: "用户名",
+    password: "密码",
+    submit: "登录",
+    submitting: "登录中…",
+    error: "登录失败,请检查用户名与密码",
+  },
   nav: { board: "会议看板" },
   board: {
     title: "会议纪要看板",
@@ -108,6 +117,12 @@ export const zh = {
     asrLocalUrl: "本地服务地址",
     asrSaveTest: "保存并测试",
     asrLocalNote: "服务未启动时在工作机运行 D:\\Tools\\local-asr\\start.bat",
+    pwTitle: "修改登录密码",
+    pwOld: "原密码",
+    pwNew: "新密码(至少 8 位)",
+    pwChange: "修改密码",
+    pwChanged: "密码已修改,其他设备会话已失效",
+    pwFailed: "修改失败",
   },
   stage: {
     queued: "排队中",

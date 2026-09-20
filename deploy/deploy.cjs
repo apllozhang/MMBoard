@@ -54,7 +54,7 @@ function pack() {
     console.error("[deploy] 缺少 dist/,先在项目根执行 npm run build");
     process.exit(1);
   }
-  execSync(`"${TAR}" -czf "${TARGZ}" -C "${PROJ}" dist public/assets server/package.json server/meeting.secret.json server/iflytek.cjs server/llm.cjs server/minutes-template.cjs server/pipeline.cjs server/server.cjs server/node_modules deploy/Dockerfile`, { stdio: "inherit" });
+  execSync(`"${TAR}" -czf "${TARGZ}" -C "${PROJ}" dist public/assets server/package.json server/iflytek.cjs server/llm.cjs server/minutes-template.cjs server/pipeline.cjs server/local.cjs server/auth.cjs server/server.cjs server/node_modules deploy/Dockerfile`, { stdio: "inherit" });
   console.log("packed:", fs.statSync(TARGZ).size, "bytes");
 }
 

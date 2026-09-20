@@ -135,7 +135,7 @@ ${(a.doubts || []).map((x) => `                <tr><td>${esc(x.person)}</td><td>
       <section id="talk-time" class="sec">
         <h2 class="section-head">发言时长</h2>
         <div class="card">
-          <p class="chart-summary">各说话人累计发言时长(按转写时间戳统计):${talk.map((x) => `${x.speaker} ${x.pct}%`).join("、")}${talk.length >= 2 ? `——占比最高者为 ${talk[0].speaker}` : ""}。</p>
+          <p class="chart-summary">各说话人累计发言时长(按转写时间戳统计):${talk.map((x) => `${esc(x.speaker)} ${x.pct}%`).join("、")}${talk.length >= 2 ? `——占比最高者为 ${esc(talk[0].speaker)}` : ""}。</p>
           ${hasChart ? `<div id="talk-chart" style="width:100%;height:${Math.max(180, talk.length * 56)}px"></div>` : ""}
           <details class="chart-data" ${hasChart ? "" : "open"}>
             <summary>时长数据表</summary>

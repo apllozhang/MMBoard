@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import MeetingBoardPage from "./pages/MeetingBoardPage";
+import App from "./App";
 import "./i18n";
 import "./index.css";
 
@@ -9,6 +9,6 @@ document.documentElement.classList.toggle("dark", localStorage.getItem("theme") 
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <MeetingBoardPage />
+    <App />
   </React.StrictMode>,
 );

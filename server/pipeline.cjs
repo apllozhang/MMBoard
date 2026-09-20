@@ -305,4 +305,4 @@ function failTask(task, e) {
   saveTasks(tasks);
 }
 
-module.exports = { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota };
+module.exports = { createTask, loadTasks, runPipeline, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota };

@@ -50,6 +50,35 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [pendingDel, setPendingDel] = useState<string | null>(null);
   const [asrTesting, setAsrTesting] = useState(false);
+  const [pwOld, setPwOld] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const changePassword = async () => {
+    if (pwBusy) return;
+    setPwBusy(true);
+    setPwMsg(null);
+    try {
+      const res = await fetch("/api/auth/password", {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/json" },
+        body: JSON.stringify({ oldPassword: pwOld, newPassword: pwNew }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setPwMsg({ ok: true, text: t("settings.pwChanged") });
+        setPwOld("");
+        setPwNew("");
+      } else {
+        setPwMsg({ ok: false, text: j.error || t("settings.pwFailed") });
+      }
+    } catch (e) {
+      setPwMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setPwBusy(false);
+    }
+  };
 
   const load = useCallback(() => {
     fetchSettings().then(setPayload).catch(() => toast("error", t("settings.loadError")));
@@ -286,6 +315,26 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
             </div>
           </div>
         )}
+      </div>
+
+      {/* 修改登录密码(R03) */}
+      <div className="mt-4 rounded-[10px] border p-3" style={{ borderColor: "var(--color-border)" }}>
+        <div className="text-[13px] font-bold text-heading">{t("settings.pwTitle")}</div>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <input type="password" className={cn(inputCls)} placeholder={t("settings.pwOld")} autoComplete="current-password"
+                 value={pwOld} onChange={(e) => setPwOld(e.target.value)} />
+          <input type="password" className={cn(inputCls)} placeholder={t("settings.pwNew")} autoComplete="new-password"
+                 value={pwNew} onChange={(e) => setPwNew(e.target.value)} />
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button type="button" className="btn btn-secondary btn-sm" disabled={pwBusy || !pwOld || !pwNew}
+                  onClick={changePassword}>{pwBusy ? t("settings.testing") : t("settings.pwChange")}</button>
+          {pwMsg && (
+            <span className="text-[12px]" style={{ color: pwMsg.ok ? "var(--status-success-text)" : "var(--status-danger-text)" }}>
+              {pwMsg.text}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* 添加 + 预设 */}
