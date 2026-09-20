@@ -118,10 +118,24 @@ async function runPipeline(task, secret) {
     /* ── transcribe ── */
     updateTask(task.id, { stage: "transcribing" });
     setStep(task.id, "transcribe", "running");
-    const { text, mock: trMock } = await transcribe(audioPath, secret.iflytek || {}, log);
+    const { text, segments, hasSpeakers, mock: trMock } = await transcribe(audioPath, secret.iflytek || {}, log);
     if (!text || text.length < 10) throw new Error("转写结果为空或过短");
     setStep(task.id, "transcribe", "done", `${text.length} 字${trMock ? "(mock)" : ""}`);
     updateTask(task.id, { transcriptChars: text.length });
+
+    /* 说话人发言时长统计(真实数据:来自讯飞时间戳分段) */
+    let talkStats = [];
+    if (segments && segments.length && hasSpeakers) {
+      const acc = new Map();
+      for (const s of segments) {
+        const sp = s.speaker || "?";
+        acc.set(sp, (acc.get(sp) || 0) + Math.max(0, (s.end || 0) - (s.start || 0)));
+      }
+      const total = [...acc.values()].reduce((a, b) => a + b, 0) || 1;
+      talkStats = [...acc.entries()]
+        .map(([speaker, ms]) => ({ speaker: `说话人${speaker}`, ms, pct: Math.round((ms / total) * 1000) / 10 }))
+        .sort((a, b) => b.ms - a.ms);
+    }
 
     /* ── analyze ── */
     updateTask(task.id, { stage: "analyzing" });
@@ -136,7 +150,7 @@ async function runPipeline(task, secret) {
     fs.mkdirSync(outDir, { recursive: true });
     const { html, fileName } = renderMinutes({
       analysis,
-      meta: { date: task.createdAt.slice(0, 10), fileName: task.fileName, transcriptChars: text.length },
+      meta: { date: task.createdAt.slice(0, 10), fileName: task.fileName, transcriptChars: text.length, talkStats },
     });
     fs.writeFileSync(path.join(outDir, fileName), html, "utf8");
     setStep(task.id, "render", "done", fileName);

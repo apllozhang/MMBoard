@@ -8,7 +8,15 @@ const fs = require("fs");
 const path = require("path");
 
 const ASSETS = path.join(__dirname, "..", "public", "assets");
+const VENDOR = path.join(__dirname, "..", "vendor");
 const logoB64 = (f) => `data:image/png;base64,${fs.readFileSync(path.join(ASSETS, f)).toString("base64")}`;
+
+/* ECharts(自托管 vendor/echarts.min.js;缺文件时图表降级为纯数据表) */
+let echartsSrc = "";
+try {
+  echartsSrc = fs.readFileSync(path.join(VENDOR, "echarts.min.js"), "utf8")
+    .replace(/<\/script/g, "<\\/script").replace(/<!--/g, "<\\!--");
+} catch { /* vendor 未部署 → 纯数据表 */ }
 
 function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -118,6 +126,27 @@ ${(a.doubts || []).map((x) => `                <tr><td>${esc(x.person)}</td><td>
             </table>
           </div>
         </div>` : ""}
+      </section>` : "";
+
+  /* 发言时长(ECharts 条形图;数据=讯飞时间戳真实统计;规范 app-workbench:类别比较→条形,配一句话摘要+数据表) */
+  const talk = Array.isArray(meta.talkStats) ? meta.talkStats : [];
+  const hasChart = !!(echartsSrc && talk.length >= 2);
+  const talkChart = talk.length ? `
+      <section id="talk-time" class="sec">
+        <h2 class="section-head">发言时长</h2>
+        <div class="card">
+          <p class="chart-summary">各说话人累计发言时长(按转写时间戳统计):${talk.map((x) => `${x.speaker} ${x.pct}%`).join("、")}${talk.length >= 2 ? `——占比最高者为 ${talk[0].speaker}` : ""}。</p>
+          ${hasChart ? `<div id="talk-chart" style="width:100%;height:${Math.max(180, talk.length * 56)}px"></div>` : ""}
+          <details class="chart-data" ${hasChart ? "" : "open"}>
+            <summary>时长数据表</summary>
+            <table class="data">
+              <thead><tr><th scope="col">说话人</th><th scope="col">累计时长</th><th scope="col">占比</th></tr></thead>
+              <tbody>
+${talk.map((x) => `                <tr><td>${esc(x.speaker)}</td><td class="num">${(x.ms / 60000).toFixed(1)} 分钟</td><td class="num">${x.pct}%</td></tr>`).join("\n")}
+              </tbody>
+            </table>
+          </details>
+        </div>
       </section>` : "";
 
   const actionRows = (a.actions || []).map((x) => `
@@ -242,6 +271,16 @@ table.data th,table.data td{padding:10px 12px;border-bottom:1px solid var(--bord
 table.data tr:last-child td{border-bottom:0}
 .table-wrap{overflow-x:auto}
 
+/* 14A 列宽调整 + 发言时长图表 */
+table.data{table-layout:fixed;width:100%}
+table.data th{position:relative}
+table.data th .grip{position:absolute;right:-2px;top:0;bottom:0;width:8px;cursor:col-resize;touch-action:none}
+table.data th .grip:hover,table.data th .grip:focus-visible{background:var(--purple-500,#7e5cb4);opacity:.4}
+table.data th .grip:focus-visible{outline:1px solid var(--purple,#6b489d);outline-offset:0}
+.chart-summary{margin:0 0 10px;font-size:.9rem;color:var(--text-2)}
+.chart-data{margin-top:10px}
+.chart-data summary{cursor:pointer;color:var(--purple,#6b489d);font-weight:600;font-size:.9rem}
+
 /* 求同存疑 · 客观复盘 */
 .ev-note{margin:0 0 14px;font-size:.86rem;color:var(--text-3)}
 .card-head{margin:0 0 10px;font-size:1rem}
@@ -289,7 +328,8 @@ footer .tm{margin:0 0 4px}
   <a href="#strengths">优点分析</a>` : ""}${(a.weaknesses || []).length ? `
   <a href="#weaknesses">缺点复盘</a>` : ""}${(a.comparison || []).length ? `
   <a href="#comparison">对比总览</a>` : ""}${(a.suggestions || []).length ? `
-  <a href="#suggestions">建议</a>` : ""}${((a.consensus || []).length || (a.doubts || []).length) ? `
+  <a href="#suggestions">建议</a>` : ""}${talkChart ? `
+  <a href="#talk-time">发言时长</a>` : ""}${((a.consensus || []).length || (a.doubts || []).length) ? `
   <a href="#review-same-diff">求同存疑</a>` : ""}
 </nav>
 
@@ -342,6 +382,7 @@ ${strengths}
 ${weaknesses}
 ${comparison}
 ${suggestions}
+${talkChart}
 ${review}
 </main>
 
@@ -365,6 +406,81 @@ ${review}
     var btn = document.getElementById("themeBtn");
     if (btn) btn.setAttribute("aria-pressed", String(dark));
   }
+})();
+</script>
+${talkChart ? `<script>${echartsSrc}</` + `script>
+<script>
+(function(){
+  var TALK = ${JSON.stringify(talk).replace(/</g, "\\u003c")};
+  var el = document.getElementById("talk-chart");
+  if (!window.echarts || !el || !TALK.length) return;
+  function dark(){ return document.documentElement.classList.contains("dark"); }
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var chart = echarts.init(el);
+  function render(){
+    var d = dark();
+    chart.setOption({
+      backgroundColor: "transparent",
+      animation: !reduce,
+      grid: { left: 96, right: 70, top: 8, bottom: 8 },
+      xAxis: { type: "value", name: "分钟", nameTextStyle: { color: d ? "#a5a1b0" : "#616467" },
+               axisLabel: { color: d ? "#a5a1b0" : "#616467" },
+               splitLine: { lineStyle: { color: d ? "#3d3849" : "#d9d9d6" } } },
+      yAxis: { type: "category", data: TALK.map(function(x){ return x.speaker; }).reverse(),
+               axisLabel: { color: d ? "#c6c3cf" : "#1a1a1a" },
+               axisLine: { lineStyle: { color: d ? "#3d3849" : "#d9d9d6" } } },
+      tooltip: { trigger: "axis", formatter: function(ps){
+        var p = ps[0]; var x = TALK[TALK.length - 1 - p.dataIndex];
+        return x.speaker + ": " + (x.ms / 60000).toFixed(1) + " 分钟(" + x.pct + "%)";
+      } },
+      series: [{ type: "bar", barMaxWidth: 26,
+        data: TALK.map(function(x){ return x.ms / 60000; }).reverse(),
+        itemStyle: { color: "#6b489d", borderRadius: [0, 6, 6, 0] },
+        label: { show: true, position: "right",
+                 formatter: function(p){ return TALK[TALK.length - 1 - p.dataIndex].pct + "%"; },
+                 color: d ? "#c6c3cf" : "#616467" } }]
+    }, true);
+  }
+  render();
+  window.addEventListener("resize", function(){ chart.resize(); });
+  document.getElementById("themeBtn").addEventListener("click", function(){ setTimeout(render, 60); });
+})();
+</script>` : ""}
+<script>
+/* 14A 列宽调整:手柄 role=separator + tabindex=0 + ←/→ ±10(Shift ±1);拖哪列只有那列变(F14) */
+(function(){
+  function init(scope){
+    scope.querySelectorAll("table.data").forEach(function(tb){
+      if (tb.dataset.rsReady) return;
+      tb.dataset.rsReady = "1";
+      tb.style.tableLayout = "fixed";
+      var ths = Array.prototype.slice.call(tb.querySelectorAll("thead th"));
+      ths.forEach(function(th){ th.style.width = th.offsetWidth + "px"; });
+      ths.slice(0, -1).forEach(function(th){
+        var g = document.createElement("span");
+        g.className = "grip";
+        g.setAttribute("role", "separator");
+        g.setAttribute("tabindex", "0");
+        g.setAttribute("aria-label", "调整列宽,左右方向键微调");
+        th.appendChild(g);
+        function freeze(){ if (!tb.style.width) tb.style.width = tb.offsetWidth + "px"; }
+        function setW(w){ th.style.width = Math.max(60, w) + "px"; }
+        g.addEventListener("mousedown", function(e){
+          e.preventDefault(); freeze();
+          var sx = e.clientX, sw = th.offsetWidth;
+          function mv(ev){ setW(sw + ev.clientX - sx); }
+          function up(){ document.removeEventListener("mousemove", mv); document.removeEventListener("mouseup", up); }
+          document.addEventListener("mousemove", mv); document.addEventListener("mouseup", up);
+        });
+        g.addEventListener("keydown", function(e){
+          if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+          e.preventDefault(); freeze();
+          setW(th.offsetWidth + (e.key === "ArrowRight" ? 1 : -1) * (e.shiftKey ? 1 : 10));
+        });
+      });
+    });
+  }
+  init(document);
 })();
 </script>
 </body>
