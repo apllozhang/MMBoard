@@ -14,8 +14,8 @@ import { ThemeToggle, LangToggle } from "@/components/Toggles";
 import { SettingsButton } from "@/components/ModelSettings";
 import { toast } from "@/lib/toast";
 import {
-  fetchMeta, fetchTasks, restartTask, uploadMeeting, deleteTask, minutesDownloadUrl,
-  STAGE_TONE, STEP_TONE, type MeetingTask, type ServerMeta, type Stage,
+  fetchMeta, fetchTasks, restartTask, uploadMeeting, deleteTask, minutesDownloadUrl, fetchRerunPreview,
+  STAGE_TONE, STEP_TONE, type MeetingTask, type ServerMeta, type Stage, type RerunPreview,
 } from "@/lib/meeting";
 
 const STAGES: Stage[] = ["queued", "extracting", "transcribing", "analyzing", "rendering", "done", "failed"];
@@ -43,6 +43,9 @@ export default function MeetingBoardPage() {
   const [detail, setDetail] = useState<MeetingTask | null>(null);
   const [pendingDelete, setPendingDelete] = useState<MeetingTask | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [rerunPreview, setRerunPreview] = useState<RerunPreview | null>(null);
+  const [rerunError, setRerunError] = useState("");
+  const [restarting, setRestarting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -90,17 +93,38 @@ export default function MeetingBoardPage() {
   }, [tasks]);
 
   const onRestart = async (id: string, scope: "analyze" | "all" = "all") => {
+    setRestarting(true);
     try {
       await restartTask(id, scope);
       toast("success", t("board.restarted"));
       setDetail(null);
+      setRerunPreview(null);
       load();
       // 重跑期间快轮询,让进度尽快可见
       let n = 0;
       const fast = window.setInterval(() => { load(); if (++n >= 15) window.clearInterval(fast); }, 2000);
     } catch (e) {
       toast("error", (e as Error).message);
+    } finally {
+      setRestarting(false);
     }
+  };
+
+  /** 整条重跑前先取额度预览,弹确认层(重新跑分析不耗转写额度,保持直接执行) */
+  const askRerunAll = async (task: MeetingTask) => {
+    setRerunError("");
+    setRerunPreview(null);
+    try {
+      const p = await fetchRerunPreview(task.id);
+      setRerunPreview(p);
+    } catch (e) {
+      setRerunError((e as Error).message);
+    }
+  };
+
+  const fmtDur = (s: number) => {
+    const m = Math.floor(s / 60), sec = Math.round(s % 60);
+    return m > 0 ? t("board.durMinSec", { m, s: sec }) : t("board.durSec", { s: sec });
   };
 
   const onDelete = async () => {
@@ -327,7 +351,7 @@ export default function MeetingBoardPage() {
                   {detail && (detail.stage === "done" || detail.stage === "failed") && detail.hasSource !== false && (
                     <button className={`btn ${detail.hasTranscript ? "btn-secondary" : "btn-primary"}`}
                             title={t("board.rerunAllTip")}
-                            onClick={() => onRestart(detail.id, "all")}>
+                            onClick={() => askRerunAll(detail)}>
                       {t("board.rerunAll")}
                     </button>
                   )}
@@ -367,6 +391,63 @@ export default function MeetingBoardPage() {
                    style={{ background: "var(--status-danger-bg)", color: "var(--status-danger-text)" }}
                    role="alert">
                 {detail.error}
+              </div>
+            )}
+          </div>
+        )}
+      </Dialog>
+
+      {/* 整条重跑确认弹层(额度余量提示,本地估算;置于详情弹层之后保证叠层在上) */}
+      <Dialog open={rerunPreview !== null || rerunError !== ""}
+              onClose={() => (restarting ? undefined : (setRerunPreview(null), setRerunError("")))}
+              title={t("board.rerunAllTitle")}
+              footer={
+                <>
+                  <button className="btn btn-secondary" disabled={restarting}
+                          onClick={() => { setRerunPreview(null); setRerunError(""); }}>{t("table.cancel")}</button>
+                  {rerunPreview && (
+                    <button className="btn btn-primary" disabled={restarting}
+                            onClick={() => detail && onRestart(detail.id, "all")}>
+                      {restarting ? t("board.restarting") : t("board.rerunAllConfirm")}
+                    </button>
+                  )}
+                </>
+              }>
+        {rerunError && (
+          <p className="m-0 text-[14px]" style={{ color: "var(--status-danger-text)" }} role="alert">
+            {t("board.rerunPreviewFail")}: {rerunError}
+          </p>
+        )}
+        {rerunPreview && detail && (
+          <div>
+            <p className="m-0 text-[14px]" style={{ color: "var(--status-danger-text)" }}>
+              {t("board.rerunAllWarning")}
+            </p>
+            <p className="mt-2 text-[13px] text-text-muted">
+              {t("board.rerunAllText", { id: detail.id, title: detail.title })}
+            </p>
+            {rerunPreview.mock ? (
+              <p className="mt-3 rounded-[8px] border px-3 py-2 text-[13px]"
+                 style={{ background: "var(--status-warning-bg)", color: "var(--status-warning-text)" }}>
+                {t("board.rerunMock")}
+              </p>
+            ) : (
+              <div className="mt-3">
+                <div className="flex flex-wrap gap-x-6 gap-y-1 text-[13px]">
+                  <span>{t("board.rerunAudio")}: <b className="tabular-nums">{fmtDur(rerunPreview.audioSeconds)}</b></span>
+                  <span>{t("board.rerunUsed")}: <b className="tabular-nums">{fmtDur(rerunPreview.usedSeconds)}</b></span>
+                  <span>{t("board.rerunFree")}: <b className="tabular-nums"
+                        style={{ color: rerunPreview.enough ? "var(--status-success-text)" : "var(--status-danger-text)" }}>
+                    {fmtDur(rerunPreview.freeSeconds)}</b></span>
+                </div>
+                {!rerunPreview.enough && (
+                  <p className="mt-2 rounded-[8px] border px-3 py-2 text-[13px]"
+                     style={{ background: "var(--status-danger-bg)", color: "var(--status-danger-text)" }}
+                     role="alert">
+                    {t("board.rerunNotEnough")}
+                  </p>
+                )}
+                <p className="mt-2 text-xs text-text-muted">{t("board.rerunEstimateNote")}</p>
               </div>
             )}
           </div>

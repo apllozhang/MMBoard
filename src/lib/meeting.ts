@@ -95,5 +95,25 @@ export async function deleteTask(id: string): Promise<void> {
   if (!res.ok) throw new Error(`删除失败 HTTP ${res.status}`);
 }
 
+/** 整条重跑额度预览(本地估算:讯飞免费额度按每日 2 小时为基准) */
+export interface RerunPreview {
+  audioSeconds: number;
+  usedSeconds: number;
+  dailySeconds: number;
+  freeSeconds: number;
+  enough: boolean;
+  mock: boolean;
+}
+
+export async function fetchRerunPreview(id: string): Promise<RerunPreview> {
+  const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/rerun-preview`);
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json() as Promise<RerunPreview>;
+}
+
 /** 纪要下载(Attachment,浏览器直接落盘;无需打开新页) */
 export const minutesDownloadUrl = (id: string) => `/api/tasks/${encodeURIComponent(id)}/minutes/download`;

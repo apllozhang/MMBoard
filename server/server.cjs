@@ -9,7 +9,15 @@ const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
-const { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, hasFfmpeg } = require("./pipeline.cjs");
+const { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, hasFfmpeg, probeAudioSeconds, readQuota } = require("./pipeline.cjs");
+
+/** 每日转写免费额度基准(秒):讯飞 lfasr 普遍规则为每日约 2 小时,可在 data/settings.json
+ *  加 "asrDailyQuotaSeconds": <秒> 覆盖;余量提示始终为本地估算,以讯飞控制台为准 */
+const DEFAULT_DAILY_ASR_SECONDS = 2 * 3600;
+function dailyAsrQuota() {
+  const n = Number(loadSettings().asrDailyQuotaSeconds);
+  return isFinite(n) && n > 0 ? n : DEFAULT_DAILY_ASR_SECONDS;
+}
 
 /** 任务附加运行时可用性:转写文本已落盘(可只重跑分析)/ 源文件还在(可整条重跑) */
 function decorateTask(t) {
@@ -176,6 +184,31 @@ app.post("/api/tasks", upload.single("file"), (req, res) => {
   const task = createTask(req.file.filename, req.file.size);
   runPipeline(task, loadSecret());   // 异步跑流水线,状态轮询看板自取
   res.status(201).json(task);
+});
+
+/* 整条重跑额度预览:本次音频时长 + 当日转写余量(本地估算,讯飞免费额度按每日 2 小时为基准) */
+app.get("/api/tasks/:id/rerun-preview", async (req, res) => {
+  const t = loadTasks().find((x) => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: "task not found" });
+  const srcPath = path.join(UPLOADS, t.fileName || "");
+  let audioSeconds = null;
+  try { audioSeconds = await probeAudioSeconds(srcPath); }
+  catch {
+    audioSeconds = Number(t.audioSeconds) || null;   // 回退:转写时记录的时长
+    if (!audioSeconds) return res.status(409).json({ error: "无法探测音频时长(源文件缺失或损坏)" });
+  }
+  const day = new Date().toISOString().slice(0, 10);
+  const dailySeconds = dailyAsrQuota();
+  const usedSeconds = readQuota(day);
+  const freeSeconds = Math.max(0, Math.round((dailySeconds - usedSeconds) * 10) / 10);
+  res.json({
+    audioSeconds,
+    usedSeconds: Math.round(usedSeconds * 10) / 10,
+    dailySeconds,
+    freeSeconds,
+    enough: freeSeconds >= audioSeconds,
+    mock: !loadSecret().iflytek?.appId,   // 讯飞未配置 = 模拟转写,不消耗额度
+  });
 });
 
 /* scope=analyze:复用已落盘转写文本,只重跑 AI 分析+生成纪要(不耗讯飞额度)

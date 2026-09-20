@@ -7,6 +7,8 @@
 const fs = require("fs");
 const path = require("path");
 const { execFile, execFileSync } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
 const { transcribe } = require("./iflytek.cjs");
 const { analyze } = require("./llm.cjs");
 const { renderMinutes } = require("./minutes-template.cjs");
@@ -15,6 +17,7 @@ const DATA = path.join(__dirname, "data");
 const UPLOADS = path.join(DATA, "uploads");
 const OUTPUTS = path.join(DATA, "outputs");
 const TASKS_FILE = path.join(DATA, "tasks.json");
+const QUOTA_FILE = path.join(DATA, "quota.json");   // 当日转写时长记账 {"YYYY-MM-DD": 秒}
 [DATA, UPLOADS, OUTPUTS].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 if (!fs.existsSync(TASKS_FILE)) fs.writeFileSync(TASKS_FILE, "[]");
 
@@ -66,6 +69,31 @@ function updateTask(taskId, patch) {
   if (i < 0) return;
   tasks[i] = { ...tasks[i], ...patch, updatedAt: new Date().toISOString() };
   saveTasks(tasks);
+}
+
+/** 当日转写用量记账:真实转写成功后按音频时长累加(秒)。mock 不记。 */
+function recordQuota(seconds) {
+  const day = new Date().toISOString().slice(0, 10);
+  let q = {};
+  try { q = JSON.parse(fs.readFileSync(QUOTA_FILE, "utf8")); } catch { /* 首日记账 */ }
+  q[day] = Math.round(((q[day] || 0) + seconds) * 10) / 10;
+  fs.writeFileSync(QUOTA_FILE, JSON.stringify(q, null, 2));
+  return q[day];
+}
+
+function readQuota(day) {
+  try { return JSON.parse(fs.readFileSync(QUOTA_FILE, "utf8"))[day] || 0; }
+  catch { return 0; }
+}
+
+/** ffprobe 探测音频时长(秒) */
+async function probeAudioSeconds(file) {
+  const { stdout } = await execFileAsync("ffprobe",
+    ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file],
+    { windowsHide: true, timeout: 30000 });
+  const s = parseFloat(String(stdout).trim());
+  if (!isFinite(s) || s <= 0) throw new Error("ffprobe 未返回有效时长");
+  return Math.round(s * 10) / 10;
 }
 
 function setStep(taskId, key, status, note = "") {
@@ -148,6 +176,15 @@ async function runFromExtract(task, secret, log) {
     setStep(task.id, "transcribe", "done", `${text.length} 字${trMock ? "(mock)" : ""}`);
     updateTask(task.id, { transcriptChars: text.length });
 
+    /* 真实转写记账:音频时长入当日额度(供"整条重跑"余量提示;失败不影响任务) */
+    if (!trMock) {
+      try {
+        const secs = await probeAudioSeconds(audioPath);
+        updateTask(task.id, { audioSeconds: secs });
+        recordQuota(secs);
+      } catch (e) { log("额度记账失败(不影响任务):", e.message); }
+    }
+
     /* 转写落盘:后续"重跑分析"可复用,不必重新转写(省讯飞额度) */
     try {
       const outDir = path.join(OUTPUTS, task.id);
@@ -221,4 +258,4 @@ function failTask(task, e) {
   updateTask(task.id, { stage: "failed", error: e.message });
 }
 
-module.exports = { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg };
+module.exports = { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota };
