@@ -9,7 +9,7 @@ const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
-const { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, hasFfmpeg, probeAudioSeconds, readQuota } = require("./pipeline.cjs");
+const { createTask, loadTasks, runPipeline, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota } = require("./pipeline.cjs");
 
 /** 每日转写免费额度基准(秒):讯飞 lfasr 普遍规则为每日约 2 小时,可在 data/settings.json
  *  加 "asrDailyQuotaSeconds": <秒> 覆盖;余量提示始终为本地估算,以讯飞控制台为准 */
@@ -97,7 +97,13 @@ function fixMojibakeName(s) {
 const upload = multer({
   storage: multer.diskStorage({
     destination: UPLOADS,
-    filename: (_req, file, cb) => cb(null, fixMojibakeName(file.originalname).replace(/[\\/:*?"<>|]/g, "_")),
+    // R01:uploads 内使用唯一存储键,与用户原始文件名解耦——同名上传互不覆盖;
+    //     原始名另存 task.originalFileName 供展示,扩展名保留(pipeline 靠它判断音视频)
+    filename: (_req, file, cb) => {
+      const safe = fixMojibakeName(file.originalname).replace(/[\\/:*?"<>|]/g, "_");
+      const ext = path.extname(safe).toLowerCase();
+      cb(null, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}${ext}`);
+    },
   }),
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },  // 2GB 上限(讯飞单文件限 5 小时时长)
 });
@@ -248,7 +254,9 @@ app.get("/api/tasks/:id", (req, res) => {
 
 app.post("/api/tasks", upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "缺少文件字段 file" });
-  const task = createTask(req.file.filename, req.file.size);
+  // R01:req.file.filename=唯一存储键;originalname 另存为展示用原始名(同名上传各自独立)
+  const originalName = fixMojibakeName(req.file.originalname).replace(/[\\/:*?"<>|]/g, "_");
+  const task = createTask(req.file.filename, originalName, req.file.size);
   runPipeline(task, loadSecret());   // 异步跑流水线,状态轮询看板自取
   res.status(201).json(task);
 });
@@ -284,11 +292,16 @@ app.get("/api/tasks/:id/rerun-preview", async (req, res) => {
 });
 
 /* scope=analyze:复用已落盘转写文本,只重跑 AI 分析+生成纪要(不耗讯飞额度)
-   scope=all(默认):整条重跑(重新转写) */
+   scope=all(默认):整条重跑(重新转写)
+   R07:运行中的任务拒绝重跑(409);每次重跑生成新 runId,旧执行的结果写入会被 runId 校验挡住 */
+const RUNNING_STAGES = new Set(["queued", "extracting", "transcribing", "analyzing", "rendering"]);
 app.post("/api/tasks/:id/restart", (req, res) => {
   const tasks = loadTasks();
   const t = tasks.find((x) => x.id === req.params.id);
   if (!t) return res.status(404).json({ error: "task not found" });
+  if (RUNNING_STAGES.has(t.stage)) {
+    return res.status(409).json({ error: "任务正在流水线上运行,请等完成后再重跑" });
+  }
   const scope = req.body?.scope === "analyze" ? "analyze" : "all";
 
   let transcript = null;
@@ -307,7 +320,8 @@ app.post("/api/tasks/:id/restart", (req, res) => {
   t.steps.forEach((s) => { s.status = "pending"; s.note = ""; s.startedAt = null; s.finishedAt = null; });
   t.stage = "queued";
   t.error = "";
-  fs.writeFileSync(path.join(__dirname, "data", "tasks.json"), JSON.stringify(tasks, null, 2));
+  t.runId = require("crypto").randomUUID();   // 新运行实例:旧执行写入会被 runId 校验拒绝
+  fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
   runPipeline(t, loadSecret(), transcript ? { transcript } : {});
   res.json(t);
 });
@@ -325,16 +339,26 @@ app.get("/api/tasks/:id/minutes/download", (req, res) => {
   fs.createReadStream(p).pipe(res);
 });
 
-/* ── 任务删除(连带纪要产物目录与上传源文件;二次确认由前端承担) ── */
+/* ── 任务删除(连带纪要产物目录与上传源文件;二次确认由前端承担)
+   R07:运行中的任务拒绝删除(409),防止后台仍在写入造成"已删除又复活";
+   R01:只删该任务自己的存储键与转码文件,不影响同名其他任务 ── */
 app.delete("/api/tasks/:id", (req, res) => {
   const tasks = loadTasks();
   const i = tasks.findIndex((x) => x.id === req.params.id);
   if (i < 0) return res.status(404).json({ error: "task not found" });
-  const [t] = tasks.splice(i, 1);
-  fs.writeFileSync(path.join(__dirname, "data", "tasks.json"), JSON.stringify(tasks, null, 2));
+  const t = tasks[i];
+  if (RUNNING_STAGES.has(t.stage)) {
+    return res.status(409).json({ error: "任务正在流水线上运行,请等完成(或失败)后再删除" });
+  }
+  tasks.splice(i, 1);
+  fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
   const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best effort */ } };
   if (t.minutesFile) rm(path.join(OUTPUTS, t.minutesFile.split("/")[0]));
+  else rm(path.join(OUTPUTS, t.id));   // 无纪要也清产物目录(transcript.json 等)
   if (t.fileName) rm(path.join(UPLOADS, t.fileName));
+  // 转码中间文件:新任务为 <uuid>.mp3,历史任务为 <task.id>.mp3,两种都清(仅限本任务拥有的键)
+  if (t.uuid) rm(path.join(UPLOADS, `${t.uuid}.mp3`));
+  rm(path.join(UPLOADS, `${t.id}.mp3`));
   res.json({ ok: true, id: t.id });
 });
 
