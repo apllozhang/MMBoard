@@ -59,9 +59,28 @@ function loadSecret() {
     try { s = JSON.parse(fs.readFileSync(SECRET_FILE, "utf8")); }
     catch (e) { console.error("[secret] 解析失败,按未配置处理:", e.message); }
   }
-  const act = activeLLM();
-  if (act) s.llm = act;
+  const st = loadSettings();
+  const act = (st.models || []).find((x) => x.id === st.activeId);
+  if (act && act.apiKey && act.model && act.baseUrl) {
+    s.llm = { provider: act.provider, baseUrl: act.baseUrl, apiKey: act.apiKey, model: act.model };
+  }
+  /* 转写通道:settings.asr 存在即生效(provider: iflytek | local) */
+  if (st.asr && st.asr.provider) s.asr = { provider: st.asr.provider, localUrl: st.asr.localUrl || "" };
   return s;
+}
+
+/** 探测本地转写服务是否在线(模型就绪) */
+async function probeLocalAsr(localUrl) {
+  if (!localUrl) return false;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 4000);
+  try {
+    const r = await fetch(String(localUrl).replace(/\/$/, "") + "/health", { signal: ctl.signal });
+    if (!r.ok) return false;
+    const j = await r.json();
+    return !!j.ok;
+  } catch { return false; }
+  finally { clearTimeout(timer); }
 }
 
 const app = express();
@@ -86,8 +105,18 @@ const upload = multer({
 app.use(express.json());
 
 /* ── API ── */
-app.get("/api/meta", (_req, res) => {
-  res.json({ ffmpeg: hasFfmpeg, iflytekConfigured: !!loadSecret().iflytek?.appId, llmConfigured: !!loadSecret().llm?.apiKey });
+app.get("/api/meta", async (_req, res) => {
+  const secret = loadSecret();
+  const st = loadSettings();
+  const asrProvider = st.asr?.provider === "local" ? "local" : "iflytek";
+  const localAsrOnline = asrProvider === "local" ? await probeLocalAsr(st.asr?.localUrl) : false;
+  res.json({
+    ffmpeg: hasFfmpeg,
+    iflytekConfigured: !!secret.iflytek?.appId,
+    llmConfigured: !!secret.llm?.apiKey,
+    asrProvider,
+    localAsrOnline,
+  });
 });
 
 /* ── 设置:模型管理 ── */
@@ -100,6 +129,8 @@ app.get("/api/settings", (_req, res) => {
   res.json({
     activeId: st.activeId || null,
     models: (st.models || []).map((m) => ({ ...m, apiKey: maskKey(m.apiKey) })),
+    // 转写通道(iflytek | local)
+    asr: { provider: st.asr?.provider === "local" ? "local" : "iflytek", localUrl: st.asr?.localUrl || "" },
     // 尚无设置条目时的现状提示:密钥文件里的 LLM(回退来源)
     fallback: secretLLM ? { provider: secretLLM.provider || "openai", baseUrl: secretLLM.baseUrl, model: secretLLM.model, apiKey: maskKey(secretLLM.apiKey) } : null,
   });
@@ -123,8 +154,12 @@ app.put("/api/settings", (req, res) => {
     };
   });
   const activeId = models.some((m) => m.id === body.activeId) ? body.activeId : (models[0]?.id || null);
-  saveSettings({ activeId, models });
-  res.json({ ok: true, activeId, count: models.length });
+  // asr 字段未提交时保留原值(兼容只改模型的旧调用)
+  const asr = body.asr
+    ? { provider: body.asr.provider === "local" ? "local" : "iflytek", localUrl: String(body.asr.localUrl || "").trim() }
+    : (prev.asr || { provider: "iflytek", localUrl: "" });
+  saveSettings({ activeId, models, asr });
+  res.json({ ok: true, activeId, count: models.length, asr });
 });
 
 app.post("/api/settings/test", async (req, res) => {
@@ -170,6 +205,24 @@ app.post("/api/settings/test", async (req, res) => {
     const ms = Date.now() - t0;
     res.json({ ok: false, ms, message: e.name === "AbortError" ? "超时(15s)" : String(e.message).slice(0, 160) });
   }
+});
+
+/* ── 转写通道测试:探测本地 FunASR 服务 ── */
+app.post("/api/settings/test-asr", async (req, res) => {
+  const localUrl = String(req.body?.localUrl || "").trim();
+  if (!localUrl) return res.json({ ok: false, message: "请先填写本地服务地址" });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const r = await fetch(String(localUrl).replace(/\/$/, "") + "/health", { signal: ctl.signal });
+    if (!r.ok) return res.json({ ok: false, message: `HTTP ${r.status}` });
+    const j = await r.json();
+    return res.json(j.ok
+      ? { ok: true, message: `本地转写服务在线(排队 ${j.queued || 0} 个任务)` }
+      : { ok: false, message: `服务可达但模型未就绪(${j.model})` });
+  } catch {
+    return res.json({ ok: false, message: "服务不可达(检查地址与工作机服务)" });
+  } finally { clearTimeout(timer); }
 });
 
 app.get("/api/tasks", (_req, res) => res.json(loadTasks().map(decorateTask)));

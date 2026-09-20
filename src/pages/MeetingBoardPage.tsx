@@ -287,7 +287,9 @@ export default function MeetingBoardPage() {
         </div>
         {meta && (
           <div className="mt-3 flex flex-wrap gap-2">
-            {metaBadge(meta.iflytekConfigured, t("board.asrOn"), t("board.asrOff"))}
+            {meta.asrProvider === "local"
+              ? metaBadge(meta.localAsrOnline === true, t("board.asrLocalOn"), t("board.asrLocalOff"))
+              : metaBadge(meta.iflytekConfigured, t("board.asrOn"), t("board.asrOff"))}
             {metaBadge(meta.llmConfigured, t("board.llmOn"), t("board.llmOff"))}
             {metaBadge(meta.ffmpeg, t("board.ffmpegOn"), t("board.ffmpegOff"))}
           </div>

@@ -37,6 +37,8 @@ export interface ServerMeta {
   ffmpeg: boolean;
   iflytekConfigured: boolean;
   llmConfigured: boolean;
+  asrProvider?: "iflytek" | "local";   // 当前转写通道
+  localAsrOnline?: boolean;            // 本地转写服务在线(仅 local 通道时有意义)
 }
 
 /** 阶段 → Badge tone(状态四色成对) */

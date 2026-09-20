@@ -8,9 +8,9 @@ import { Dialog } from "@/components/Dialog";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
-  fetchSettings, saveSettings, testSavedModel, testDraftModel,
+  fetchSettings, saveSettings, testSavedModel, testDraftModel, testAsrService,
   MODEL_PRESETS, newModelId,
-  type ModelEntry, type SettingsPayload,
+  type ModelEntry, type SettingsPayload, type AsrConfig,
 } from "@/lib/settings";
 
 const EMPTY_DRAFT = { id: "", name: "", provider: "openai" as const, baseUrl: "", model: "", apiKey: "" };
@@ -49,17 +49,18 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);          // 保存/测试进行中
   const [testingId, setTestingId] = useState<string | null>(null);
   const [pendingDel, setPendingDel] = useState<string | null>(null);
+  const [asrTesting, setAsrTesting] = useState(false);
 
   const load = useCallback(() => {
     fetchSettings().then(setPayload).catch(() => toast("error", t("settings.loadError")));
   }, [t]);
   useEffect(() => { load(); }, [load]);
 
-  const persist = async (next: { activeId: string | null; models: ModelEntry[] }, okMsg?: string) => {
+  const persist = async (next: { activeId: string | null; models: ModelEntry[]; asr?: AsrConfig }, okMsg?: string) => {
     setBusy(true);
     try {
       const r = await saveSettings(next);
-      setPayload((p) => (p ? { ...p, activeId: r.activeId, models: next.models } : p));
+      setPayload((p) => (p ? { ...p, activeId: r.activeId, models: next.models, asr: next.asr ?? p.asr } : p));
       if (okMsg) toast("success", okMsg);
     } catch (e) {
       toast("error", (e as Error).message);
@@ -121,6 +122,27 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
     const activeId = payload.activeId === id ? (models[0]?.id || null) : payload.activeId;
     setPendingDel(null);
     await persist({ activeId, models }, t("settings.deleted"));
+  };
+
+  /** 切换转写通道(radio 即时生效;asr 缺省由后端保留原值) */
+  const asr: AsrConfig = payload?.asr ?? { provider: "iflytek", localUrl: "" };
+  const switchAsr = async (provider: AsrConfig["provider"]) => {
+    if (!payload) return;
+    const next: AsrConfig = provider === "local"
+      ? { provider, localUrl: asr.localUrl || "http://10.10.10.144:8300" }
+      : { provider, localUrl: asr.localUrl };
+    await persist({ activeId: payload.activeId, models: payload.models, asr: next }, t("settings.saved"));
+  };
+  const testLocalAsr = async () => {
+    setAsrTesting(true);
+    try {
+      const r = await testAsrService(asr.localUrl);
+      toast(r.ok ? "success" : "error", r.message || (r.ok ? t("settings.testOk") : t("settings.testFail")));
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setAsrTesting(false);
+    }
   };
 
   const inputCls = "w-full rounded-[8px] border border-border bg-surface px-2.5 py-1.5 text-[13px]";
@@ -222,6 +244,49 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
           </div>
         </div>
       )}
+
+      {/* 转写通道(讯飞云 / 本地离线) */}
+      <div className="mt-4 rounded-[10px] border p-3" style={{ borderColor: "var(--color-border)" }}>
+        <div className="text-[13px] font-bold text-heading">{t("settings.asrTitle")}</div>
+        <p className="m-0 mt-0.5 text-[12px] text-text-muted">{t("settings.asrDesc")}</p>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <label className="flex cursor-pointer items-start gap-2 rounded-[8px] border p-2.5"
+                 style={{ borderColor: asr.provider === "iflytek" ? "var(--color-action)" : "var(--color-border)",
+                          background: asr.provider === "iflytek" ? "var(--color-purple-tint)" : "transparent" }}>
+            <input type="radio" name="asrProvider" className="mt-0.5" checked={asr.provider === "iflytek"}
+                   disabled={busy} onChange={() => switchAsr("iflytek")} />
+            <span>
+              <b className="text-[13px]">{t("settings.asrIflytek")}</b>
+              <span className="block text-[11.5px] text-text-muted">{t("settings.asrIflytekHint")}</span>
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-start gap-2 rounded-[8px] border p-2.5"
+                 style={{ borderColor: asr.provider === "local" ? "var(--color-action)" : "var(--color-border)",
+                          background: asr.provider === "local" ? "var(--color-purple-tint)" : "transparent" }}>
+            <input type="radio" name="asrProvider" className="mt-0.5" checked={asr.provider === "local"}
+                   disabled={busy} onChange={() => switchAsr("local")} />
+            <span>
+              <b className="text-[13px]">{t("settings.asrLocal")}</b>
+              <span className="block text-[11.5px] text-text-muted">{t("settings.asrLocalHint")}</span>
+            </span>
+          </label>
+        </div>
+        {asr.provider === "local" && (
+          <div className="mt-2.5">
+            <label className="text-[12px] text-text-muted">{t("settings.asrLocalUrl")}
+              <input className={cn(inputCls, "mt-0.5")} value={asr.localUrl} placeholder="http://10.10.10.144:8300"
+                     onChange={(e) => setPayload((p) => (p ? { ...p, asr: { ...asr, localUrl: e.target.value } } : p))} />
+            </label>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button type="button" className="btn btn-secondary btn-sm" disabled={busy || asrTesting}
+                      onClick={async () => { await persist({ activeId: payload?.activeId ?? null, models: payload?.models ?? [], asr }, undefined); testLocalAsr(); }}>
+                {asrTesting ? t("settings.testing") : t("settings.asrSaveTest")}
+              </button>
+              <span className="text-[11.5px] text-text-muted">{t("settings.asrLocalNote")}</span>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* 添加 + 预设 */}
       <div className="flex flex-wrap items-center gap-2">

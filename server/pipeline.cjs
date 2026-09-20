@@ -10,6 +10,7 @@ const { execFile, execFileSync } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 const { transcribe } = require("./iflytek.cjs");
+const localAsr = require("./local.cjs");
 const { analyze } = require("./llm.cjs");
 const { renderMinutes } = require("./minutes-template.cjs");
 
@@ -168,16 +169,19 @@ async function runFromExtract(task, secret, log) {
       setStep(task.id, "extract", "skipped", "纯音频直传(未安装 ffmpeg,跳过转码)");
     }
 
-    /* ── transcribe ── */
+    /* ── transcribe(通道:本地 FunASR / 讯飞云) ── */
     updateTask(task.id, { stage: "transcribing" });
     setStep(task.id, "transcribe", "running");
-    const { text, segments, hasSpeakers, mock: trMock } = await transcribe(audioPath, secret.iflytek || {}, log);
+    const useLocal = (secret.asr?.provider === "local");
+    const { text, segments, hasSpeakers, mock: trMock } = useLocal
+      ? await localAsr.transcribe(audioPath, secret.asr || {}, log)
+      : await transcribe(audioPath, secret.iflytek || {}, log);
     if (!text || text.length < 10) throw new Error("转写结果为空或过短");
-    setStep(task.id, "transcribe", "done", `${text.length} 字${trMock ? "(mock)" : ""}`);
+    setStep(task.id, "transcribe", "done", `${text.length} 字${useLocal ? "(本地)" : trMock ? "(mock)" : ""}`);
     updateTask(task.id, { transcriptChars: text.length });
 
-    /* 真实转写记账:音频时长入当日额度(供"整条重跑"余量提示;失败不影响任务) */
-    if (!trMock) {
+    /* 真实转写记账:仅讯飞通道(本地转写不耗额度)。失败不影响任务 */
+    if (!trMock && !useLocal) {
       try {
         const secs = await probeAudioSeconds(audioPath);
         updateTask(task.id, { audioSeconds: secs });
