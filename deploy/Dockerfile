@@ -12,6 +12,11 @@ COPY server/package.json ./
 COPY server/iflytek.cjs server/llm.cjs server/minutes-template.cjs server/pipeline.cjs server/local.cjs server/auth.cjs server/server.cjs ./
 COPY dist ../dist
 COPY public/assets ../public/assets
+COPY vendor ../vendor
+# R10/R11:构建元信息注入(部署脚本传 build-arg,/api/version 回显)
+ARG GIT_COMMIT=unknown
+ARG BUILD_TIME=unknown
+ENV GIT_COMMIT=${GIT_COMMIT} BUILD_TIME=${BUILD_TIME}
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "server.cjs"]
