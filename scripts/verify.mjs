@@ -11,7 +11,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 
-const require = createRequire("D:/AIWork/ZCode/WebUI/repo/kit/tools/package.json");
+const require = createRequire(
+  new URL("../../repo/kit/tools/package.json", import.meta.url),
+);
 const puppeteer = require("puppeteer-core");
 
 const BASE = process.argv[2] || "http://127.0.0.1:4173";
