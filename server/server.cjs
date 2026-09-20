@@ -48,10 +48,20 @@ function loadSecret() {
 }
 
 const app = express();
+
+/* 浏览器把中文文件名以 UTF-8 放进 multipart,busboy 默认按 Latin-1 解码 → 乱码。
+   特征:文件名含 Latin-1 高位字符(如 è/ç/å);Latin-1 字节重读为 UTF-8 能还原则修复,
+   还原失败(含替换符)或本就是正确 CJK/ASCII 则原样返回。 */
+function fixMojibakeName(s) {
+  if (!s || !/[\u0080-\u00FF]/.test(s)) return s;
+  const fixed = Buffer.from(s, "latin1").toString("utf8");
+  return fixed.includes("\uFFFD") ? s : fixed;
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: UPLOADS,
-    filename: (_req, file, cb) => cb(null, file.originalname.replace(/[\\/:*?"<>|]/g, "_")),
+    filename: (_req, file, cb) => cb(null, fixMojibakeName(file.originalname).replace(/[\\/:*?"<>|]/g, "_")),
   }),
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },  // 2GB 上限(讯飞单文件限 5 小时时长)
 });
