@@ -81,7 +81,7 @@ function activeLLM() {
   const m = (st.models || []).find((x) => x.id === st.activeId);
   return (m && m.apiKey && m.model && m.baseUrl) ? { provider: m.provider, baseUrl: m.baseUrl, apiKey: m.apiKey, model: m.model } : null;
 }
-/** 生效 LLM 配置:设置里的激活模型优先,回退 meeting.secret.json(兼容既有部署) */
+/** 生效 LLM/讯飞配置:设置里的激活模型与讯飞参数优先,回退 meeting.secret.json(兼容既有部署) */
 function loadSecret() {
   let s = {};
   if (fs.existsSync(SECRET_FILE)) {
@@ -93,9 +93,23 @@ function loadSecret() {
   if (act && act.apiKey && act.model && act.baseUrl) {
     s.llm = { provider: act.provider, baseUrl: act.baseUrl, apiKey: act.apiKey, model: act.model };
   }
-  /* 转写通道:settings.asr 存在即生效(provider: iflytek | local) */
+  /* 转写通道:settings.asr 存在即生效(provider: iflytek | local);讯飞参数 settings 优先 */
   if (st.asr && st.asr.provider) s.asr = { provider: st.asr.provider, localUrl: st.asr.localUrl || "" };
+  if (st.iflytek && st.iflytek.appId) s.iflytek = { appId: st.iflytek.appId, apiKey: st.iflytek.apiKey || "", apiSecret: st.iflytek.apiSecret || "" };
   return s;
+}
+
+/** 讯飞参数的"当前生效值":settings 里配置过用 settings,否则回退密钥文件(GET 打码与 PUT 打码保留的基准) */
+function effectiveIflytek() {
+  const st = loadSettings();
+  if (st.iflytek && st.iflytek.appId) return st.iflytek;
+  try {
+    if (fs.existsSync(SECRET_FILE)) {
+      const s = JSON.parse(fs.readFileSync(SECRET_FILE, "utf8"));
+      if (s.iflytek && s.iflytek.appId) return s.iflytek;
+    }
+  } catch { /* 回退失败按无配置 */ }
+  return {};
 }
 
 /** 探测本地转写服务是否在线(模型就绪) */
@@ -235,6 +249,12 @@ app.get("/api/settings", (_req, res) => {
     models: (st.models || []).map((m) => ({ ...m, apiKey: maskKey(m.apiKey) })),
     // 转写通道(iflytek | local)
     asr: { provider: st.asr?.provider === "local" ? "local" : "iflytek", localUrl: st.asr?.localUrl || "" },
+    // 讯飞云参数(appId 明文;key/secret 打码;来自 settings 或回退密钥文件)
+    iflytek: (() => {
+      const f = effectiveIflytek();
+      return { appId: f.appId || "", apiKey: maskKey(f.apiKey), apiSecret: maskKey(f.apiSecret),
+               fromFallback: !st.iflytek?.appId };
+    })(),
     // 尚无设置条目时的现状提示:密钥文件里的 LLM(回退来源)
     fallback: secretLLM ? { provider: secretLLM.provider || "openai", baseUrl: secretLLM.baseUrl, model: secretLLM.model, apiKey: maskKey(secretLLM.apiKey) } : null,
   });
@@ -273,9 +293,21 @@ app.put("/api/settings", (req, res) => {
   if (asr.provider === "local" && asr.localUrl && !validLocalUrl(asr.localUrl)) {
     return res.status(400).json({ error: "本地服务地址仅允许内网/本机地址(localhost / 10.x / 172.16-31.x / 192.168.x)" });
   }
-  saveSettings({ activeId, models, asr });
-  audit(req, "settings.save", `models=${models.length} asr=${asr.provider}`);
-  res.json({ ok: true, activeId, count: models.length, asr });
+  // 讯飞参数:appId 明文;key/secret 含打码则沿用当前生效值(R05 同款防外送);
+  // body 未提交 iflytek 时保留 prev(可能来自回退,首次保存后固化进 settings)
+  const eff = effectiveIflytek();
+  const iflytekIn = body.iflytek;
+  const iflytek = iflytekIn ? {
+    appId: String(iflytekIn.appId || "").trim(),
+    apiKey: (typeof iflytekIn.apiKey === "string" && iflytekIn.apiKey.includes("****")) ? String(eff.apiKey || "") : String(iflytekIn.apiKey || "").trim(),
+    apiSecret: (typeof iflytekIn.apiSecret === "string" && iflytekIn.apiSecret.includes("****")) ? String(eff.apiSecret || "") : String(iflytekIn.apiSecret || "").trim(),
+  } : (prev.iflytek || { appId: String(eff.appId || ""), apiKey: String(eff.apiKey || ""), apiSecret: String(eff.apiSecret || "") });
+  if (iflytek.appId && (!iflytek.apiKey || !iflytek.apiSecret)) {
+    return res.status(400).json({ error: "讯飞参数需同时填写 appId、apiKey、apiSecret" });
+  }
+  saveSettings({ activeId, models, asr, iflytek });
+  audit(req, "settings.save", `models=${models.length} asr=${asr.provider} iflytek=${iflytek.appId ? "set" : "empty"}`);
+  res.json({ ok: true, activeId, count: models.length, asr, iflytek: { appId: iflytek.appId, apiKey: maskKey(iflytek.apiKey), apiSecret: maskKey(iflytek.apiSecret) } });
 });
 
 app.post("/api/settings/test", async (req, res) => {

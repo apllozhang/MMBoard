@@ -17,10 +17,20 @@ export interface AsrConfig {
   localUrl: string;
 }
 
+/** 讯飞云转写参数(appId 明文;key/secret 打码回显,提交打码值=不修改) */
+export interface IflytekConfig {
+  appId: string;
+  apiKey: string;
+  apiSecret: string;
+  /** 当前参数来自密钥文件回退(settings 内尚未保存过) */
+  fromFallback?: boolean;
+}
+
 export interface SettingsPayload {
   activeId: string | null;
   models: ModelEntry[];
   asr: AsrConfig;
+  iflytek: IflytekConfig;
   /** models 为空时,实际生效的是密钥文件里的配置(兼容既有部署) */
   fallback: { provider: string; baseUrl: string; model: string; apiKey: string } | null;
 }
@@ -46,7 +56,7 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const fetchSettings = () => jsonFetch<SettingsPayload>("/api/settings");
 
-export const saveSettings = (p: { activeId: string | null; models: ModelEntry[]; asr?: AsrConfig }) =>
+export const saveSettings = (p: { activeId: string | null; models: ModelEntry[]; asr?: AsrConfig; iflytek?: IflytekConfig }) =>
   jsonFetch<{ ok: boolean; activeId: string; count: number }>("/api/settings", {
     method: "PUT",
     body: JSON.stringify(p),

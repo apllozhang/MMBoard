@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 import {
   fetchSettings, saveSettings, testSavedModel, testDraftModel, testAsrService,
   MODEL_PRESETS, newModelId,
-  type ModelEntry, type SettingsPayload, type AsrConfig,
+  type ModelEntry, type SettingsPayload, type AsrConfig, type IflytekConfig,
 } from "@/lib/settings";
 
 const EMPTY_DRAFT = { id: "", name: "", provider: "openai" as const, baseUrl: "", model: "", apiKey: "" };
@@ -85,14 +85,16 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
   }, [t]);
   useEffect(() => { load(); }, [load]);
 
-  const persist = async (next: { activeId: string | null; models: ModelEntry[]; asr?: AsrConfig }, okMsg?: string) => {
+  const persist = async (next: { activeId: string | null; models: ModelEntry[]; asr?: AsrConfig; iflytek?: IflytekConfig }, okMsg?: string) => {
     setBusy(true);
     try {
       const r = await saveSettings(next);
-      setPayload((p) => (p ? { ...p, activeId: r.activeId, models: next.models, asr: next.asr ?? p.asr } : p));
+      setPayload((p) => (p ? { ...p, activeId: r.activeId, models: next.models, asr: next.asr ?? p.asr, iflytek: (r as { iflytek?: IflytekConfig }).iflytek ?? p.iflytek } : p));
       if (okMsg) toast("success", okMsg);
+      return true;
     } catch (e) {
       toast("error", (e as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -112,7 +114,8 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
     const exists = payload.models.some((m) => m.id === draft.id);
     const models = exists ? payload.models.map((m) => (m.id === draft.id ? draft : m)) : [...payload.models, draft];
     const activeId = payload.activeId || draft.id;   // 首个模型自动激活
-    persist({ activeId, models }, t("settings.saved")).then(() => setDraft(null));
+    // R21:保存失败(persist 返回 false)时保留草稿输入
+    persist({ activeId, models, iflytek: iflytekSaved }, t("settings.saved")).then((ok) => { if (ok) setDraft(null); });
   };
 
   const testRow = async (m: ModelEntry) => {
@@ -153,14 +156,25 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
     await persist({ activeId, models }, t("settings.deleted"));
   };
 
-  /** 切换转写通道(radio 即时生效;asr 缺省由后端保留原值) */
+  /** 转写通道:asr(讯飞/本地)+ 讯飞云参数,两者独立于 AI 分析模型配置 */
   const asr: AsrConfig = payload?.asr ?? { provider: "iflytek", localUrl: "" };
+  const iflytekSaved: IflytekConfig = payload?.iflytek ?? { appId: "", apiKey: "", apiSecret: "" };
+  const [iflytekDraft, setIflytekDraft] = useState<IflytekConfig | null>(null);
+  const iflytekForm = iflytekDraft ?? iflytekSaved;
+  const editIflytek = (k: keyof IflytekConfig, v: string) => setIflytekDraft({ ...iflytekForm, [k]: v });
+
   const switchAsr = async (provider: AsrConfig["provider"]) => {
     if (!payload) return;
     const next: AsrConfig = provider === "local"
       ? { provider, localUrl: asr.localUrl || "http://10.10.10.144:8300" }
       : { provider, localUrl: asr.localUrl };
-    await persist({ activeId: payload.activeId, models: payload.models, asr: next }, t("settings.saved"));
+    // 切换通道只切 provider,讯飞参数提交"最近保存值"(草稿用「保存转写设置」提交)
+    await persist({ activeId: payload.activeId, models: payload.models, asr: next, iflytek: iflytekSaved }, t("settings.saved"));
+  };
+  const saveAsrSettings = async () => {
+    if (!payload) return;
+    const ok = await persist({ activeId: payload.activeId, models: payload.models, asr, iflytek: iflytekForm }, t("settings.saved"));
+    if (ok) setIflytekDraft(null);
   };
   const testLocalAsr = async () => {
     setAsrTesting(true);
@@ -274,7 +288,7 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
-      {/* 转写通道(讯飞云 / 本地离线) */}
+      {/* 转写通道(讯飞云/本地):与 AI 分析模型相互独立 */}
       <div className="mt-4 rounded-[10px] border p-3" style={{ borderColor: "var(--color-border)" }}>
         <div className="text-[13px] font-bold text-heading">{t("settings.asrTitle")}</div>
         <p className="m-0 mt-0.5 text-[12px] text-text-muted">{t("settings.asrDesc")}</p>
@@ -300,6 +314,32 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
             </span>
           </label>
         </div>
+        {asr.provider === "iflytek" && (
+          <div className="mt-2.5">
+            <div className="grid gap-2 sm:grid-cols-3">
+              <label className="text-[12px] text-text-muted">{t("settings.iflytekAppId")}
+                <input className={cn(inputCls, "mt-0.5")} value={iflytekForm.appId} autoComplete="off"
+                       onChange={(e) => editIflytek("appId", e.target.value)} />
+              </label>
+              <label className="text-[12px] text-text-muted">{t("settings.iflytekApiKey")}
+                <input className={cn(inputCls, "mt-0.5")} type="password" value={iflytekForm.apiKey} autoComplete="off"
+                       onChange={(e) => editIflytek("apiKey", e.target.value)} />
+              </label>
+              <label className="text-[12px] text-text-muted">{t("settings.iflytekApiSecret")}
+                <input className={cn(inputCls, "mt-0.5")} type="password" value={iflytekForm.apiSecret} autoComplete="off"
+                       onChange={(e) => editIflytek("apiSecret", e.target.value)} />
+              </label>
+            </div>
+            <p className="m-0 mt-1 text-[11.5px] text-text-muted">{t("settings.iflytekKeyHint")}</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button type="button" className="btn btn-secondary btn-sm" disabled={busy}
+                      onClick={saveAsrSettings}>{t("settings.asrSave")}</button>
+              {iflytekSaved.fromFallback && iflytekSaved.appId && (
+                <span className="text-[11.5px] text-text-muted">{t("settings.iflytekFallbackNote")}</span>
+              )}
+            </div>
+          </div>
+        )}
         {asr.provider === "local" && (
           <div className="mt-2.5">
             <label className="text-[12px] text-text-muted">{t("settings.asrLocalUrl")}
@@ -308,7 +348,7 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
             </label>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <button type="button" className="btn btn-secondary btn-sm" disabled={busy || asrTesting}
-                      onClick={async () => { await persist({ activeId: payload?.activeId ?? null, models: payload?.models ?? [], asr }, undefined); testLocalAsr(); }}>
+                      onClick={async () => { const ok = await persist({ activeId: payload?.activeId ?? null, models: payload?.models ?? [], asr, iflytek: iflytekSaved }, undefined); if (ok) testLocalAsr(); }}>
                 {asrTesting ? t("settings.testing") : t("settings.asrSaveTest")}
               </button>
               <span className="text-[11.5px] text-text-muted">{t("settings.asrLocalNote")}</span>
