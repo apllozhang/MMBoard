@@ -408,8 +408,8 @@ ${review}
   }
 })();
 </script>
-${talkChart ? `<script>${echartsSrc}</` + `script>
-<script>
+${talkChart ? `<script>${hasChart ? echartsSrc : ""}</` + `script>
+${hasChart ? `<script>
 (function(){
   var TALK = ${JSON.stringify(talk).replace(/</g, "\\u003c")};
   var el = document.getElementById("talk-chart");
@@ -445,7 +445,7 @@ ${talkChart ? `<script>${echartsSrc}</` + `script>
   window.addEventListener("resize", function(){ chart.resize(); });
   document.getElementById("themeBtn").addEventListener("click", function(){ setTimeout(render, 60); });
 })();
-</script>` : ""}
+</script>` : ""}` : ""}
 <script>
 /* 14A 列宽调整:手柄 role=separator + tabindex=0 + ←/→ ±10(Shift ±1);拖哪列只有那列变(F14) */
 (function(){

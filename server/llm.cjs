@@ -30,7 +30,7 @@ async function analyze(transcript, cfg, log = console.log) {
       },
       body: JSON.stringify({
         model: cfg.model,
-        max_tokens: 8192,
+        max_tokens: 16384,   // 求同存疑等章节加入后,8192 会被截断(无闭合括号)
         system,
         messages: [{ role: "user", content: prompt }],
       }),
@@ -38,6 +38,7 @@ async function analyze(transcript, cfg, log = console.log) {
     if (!res.ok) throw new Error(`LLM API HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
     j = await res.json();
     const content = (j.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("");
+    console.log(`[llm] 响应 ${content.length} 字 stop=${j.stop_reason ?? "-"}`);
     return { ...extractJson(content), mock: false };
   }
 
@@ -47,6 +48,7 @@ async function analyze(transcript, cfg, log = console.log) {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
     body: JSON.stringify({
       model: cfg.model,
+      max_tokens: 16384,
       messages: [
         { role: "system", content: system },
         { role: "user", content: prompt },
@@ -57,6 +59,7 @@ async function analyze(transcript, cfg, log = console.log) {
   if (!res.ok) throw new Error(`LLM API HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
   j = await res.json();
   const content = j.choices?.[0]?.message?.content ?? "";
+  console.log(`[llm] 响应 ${content.length} 字 stop=${j.choices?.[0]?.finish_reason ?? "-"}`);
   return { ...extractJson(content), mock: false };
 }
 
@@ -98,11 +101,55 @@ ${truncated ? "注意:转写较长,中段已省略,请基于保留内容分析,�
 ${input}`;
 }
 
-/** 宽容解析:模型偶尔包 ```json 围栏 */
+/** 截断 JSON 修复:扫描字符串/转义状态,截到最后一个完整顶层成员,按该时刻的栈闭合剩余结构 */
+function repairTruncatedJson(src) {
+  let inStr = false, esc = false;
+  const stack = [];
+  let lastSafe = -1, safeStack = null;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === "{" || c === "[") { stack.push(c); continue; }
+    if (c === "}" || c === "]") {
+      stack.pop();
+      if (stack.length === 1) { lastSafe = i + 1; safeStack = stack.slice(); }   // 快照此刻的栈
+      if (stack.length === 0) return src;         // 本就完整
+    }
+  }
+  if (lastSafe <= 0 || !safeStack) return null;
+  let cut = src.slice(0, lastSafe).replace(/[,:\s]+$/, "");
+  for (let i = safeStack.length - 1; i >= 0; i--) cut += safeStack[i] === "{" ? "}" : "]";
+  return cut;
+}
+
+/** 宽容解析:模型偶尔包 ```json 围栏、在字符串里输出裸控制字符(换行/制表)、或被 max_tokens 截断(无闭合括号) */
 function extractJson(text) {
+  let lastErr = "";
   const m = text.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("LLM 未返回 JSON: " + text.slice(0, 120));
-  return JSON.parse(m[0]);
+  if (m) {
+    // 控制字符在 JSON 字符串里非法,替换为空格(内容影响可忽略)
+    const cleaned = m[0].replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ");
+    try { return JSON.parse(cleaned); }
+    catch (e) { lastErr = e.message; }
+  }
+  // 截断修复:保留已完成字段(后置章节缺失由模板按空数组兜底)
+  const src = m ? m[0] : text;
+  const repaired = repairTruncatedJson(src);
+  if (repaired) {
+    try {
+      const obj = JSON.parse(repaired.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " "));
+      console.log(`[llm] 输出疑似被截断,已修复为部分纪要(${Object.keys(obj).length} 个字段)`);
+      return obj;
+    } catch { /* 继续走报错 */ }
+  }
+  throw new Error("LLM 未返回可解析 JSON(" + (lastErr || "无闭合括号").slice(0, 80) + "): " +
+    src.slice(0, 80) + " ……尾部: " + src.slice(-60));
 }
 
 function mockAnalysis(transcript) {
