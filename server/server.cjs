@@ -253,7 +253,9 @@ app.post("/api/tasks", upload.single("file"), (req, res) => {
   res.status(201).json(task);
 });
 
-/* 整条重跑额度预览:本次音频时长 + 当日转写余量(本地估算,讯飞免费额度按每日 2 小时为基准) */
+/* 整条重跑额度预览:按当前转写通道给出不同口径
+   本地通道 → 音频时长 + 预计转写耗时(RTF≈0.1 估),不涉讯飞额度
+   讯飞通道 → 音频时长 + 当日余量(本地估算,免费额度按每日 2 小时为基准) */
 app.get("/api/tasks/:id/rerun-preview", async (req, res) => {
   const t = loadTasks().find((x) => x.id === req.params.id);
   if (!t) return res.status(404).json({ error: "task not found" });
@@ -264,17 +266,20 @@ app.get("/api/tasks/:id/rerun-preview", async (req, res) => {
     audioSeconds = Number(t.audioSeconds) || null;   // 回退:转写时记录的时长
     if (!audioSeconds) return res.status(409).json({ error: "无法探测音频时长(源文件缺失或损坏)" });
   }
+  const provider = loadSecret().asr?.provider === "local" ? "local" : "iflytek";
   const day = new Date().toISOString().slice(0, 10);
   const dailySeconds = dailyAsrQuota();
   const usedSeconds = readQuota(day);
   const freeSeconds = Math.max(0, Math.round((dailySeconds - usedSeconds) * 10) / 10);
   res.json({
+    provider,
     audioSeconds,
+    estSeconds: provider === "local" ? Math.round(audioSeconds * 0.1 + 30) : null,
     usedSeconds: Math.round(usedSeconds * 10) / 10,
     dailySeconds,
     freeSeconds,
     enough: freeSeconds >= audioSeconds,
-    mock: !loadSecret().iflytek?.appId,   // 讯飞未配置 = 模拟转写,不消耗额度
+    mock: provider === "iflytek" && !loadSecret().iflytek?.appId,   // 讯飞通道且未配置 = 模拟转写
   });
 });
 

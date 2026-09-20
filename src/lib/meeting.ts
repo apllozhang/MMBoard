@@ -99,7 +99,9 @@ export async function deleteTask(id: string): Promise<void> {
 
 /** 整条重跑额度预览(本地估算:讯飞免费额度按每日 2 小时为基准) */
 export interface RerunPreview {
+  provider: "iflytek" | "local";   // 当前生效转写通道
   audioSeconds: number;
+  estSeconds: number | null;       // 本地通道:预计转写耗时(秒)
   usedSeconds: number;
   dailySeconds: number;
   freeSeconds: number;

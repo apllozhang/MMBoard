@@ -507,35 +507,55 @@ export default function MeetingBoardPage() {
         )}
         {rerunPreview && detail && (
           <div>
-            <p className="m-0 text-[14px]" style={{ color: "var(--status-danger-text)" }}>
-              {t("board.rerunAllWarning")}
-            </p>
-            <p className="mt-2 text-[13px] text-text-muted">
-              {t("board.rerunAllText", { id: detail.id, title: detail.title })}
-            </p>
-            {rerunPreview.mock ? (
-              <p className="mt-3 rounded-[8px] border px-3 py-2 text-[13px]"
-                 style={{ background: "var(--status-warning-bg)", color: "var(--status-warning-text)" }}>
-                {t("board.rerunMock")}
-              </p>
-            ) : (
-              <div className="mt-3">
-                <div className="flex flex-wrap gap-x-6 gap-y-1 text-[13px]">
+            {rerunPreview.provider === "local" ? (
+              <>
+                <p className="m-0 rounded-[8px] border px-3 py-2 text-[13px]"
+                   style={{ background: "var(--status-success-bg)", color: "var(--status-success-text)" }}>
+                  {t("board.rerunLocalNote")}
+                </p>
+                <p className="mt-2 text-[13px] text-text-muted">
+                  {t("board.rerunAllText", { id: detail.id, title: detail.title })}
+                </p>
+                <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-[13px]">
                   <span>{t("board.rerunAudio")}: <b className="tabular-nums">{fmtDur(rerunPreview.audioSeconds)}</b></span>
-                  <span>{t("board.rerunUsed")}: <b className="tabular-nums">{fmtDur(rerunPreview.usedSeconds)}</b></span>
-                  <span>{t("board.rerunFree")}: <b className="tabular-nums"
-                        style={{ color: rerunPreview.enough ? "var(--status-success-text)" : "var(--status-danger-text)" }}>
-                    {fmtDur(rerunPreview.freeSeconds)}</b></span>
+                  {rerunPreview.estSeconds != null && (
+                    <span>{t("board.rerunEstTranscribe")}: <b className="tabular-nums">≈ {fmtDur(rerunPreview.estSeconds)}</b></span>
+                  )}
                 </div>
-                {!rerunPreview.enough && (
-                  <p className="mt-2 rounded-[8px] border px-3 py-2 text-[13px]"
-                     style={{ background: "var(--status-danger-bg)", color: "var(--status-danger-text)" }}
-                     role="alert">
-                    {t("board.rerunNotEnough")}
+              </>
+            ) : (
+              <>
+                <p className="m-0 text-[14px]" style={{ color: "var(--status-danger-text)" }}>
+                  {t("board.rerunAllWarning")}
+                </p>
+                <p className="mt-2 text-[13px] text-text-muted">
+                  {t("board.rerunAllText", { id: detail.id, title: detail.title })}
+                </p>
+                {rerunPreview.mock ? (
+                  <p className="mt-3 rounded-[8px] border px-3 py-2 text-[13px]"
+                     style={{ background: "var(--status-warning-bg)", color: "var(--status-warning-text)" }}>
+                    {t("board.rerunMock")}
                   </p>
+                ) : (
+                  <div className="mt-3">
+                    <div className="flex flex-wrap gap-x-6 gap-y-1 text-[13px]">
+                      <span>{t("board.rerunAudio")}: <b className="tabular-nums">{fmtDur(rerunPreview.audioSeconds)}</b></span>
+                      <span>{t("board.rerunUsed")}: <b className="tabular-nums">{fmtDur(rerunPreview.usedSeconds)}</b></span>
+                      <span>{t("board.rerunFree")}: <b className="tabular-nums"
+                            style={{ color: rerunPreview.enough ? "var(--status-success-text)" : "var(--status-danger-text)" }}>
+                        {fmtDur(rerunPreview.freeSeconds)}</b></span>
+                    </div>
+                    {!rerunPreview.enough && (
+                      <p className="mt-2 rounded-[8px] border px-3 py-2 text-[13px]"
+                         style={{ background: "var(--status-danger-bg)", color: "var(--status-danger-text)" }}
+                         role="alert">
+                        {t("board.rerunNotEnough")}
+                      </p>
+                    )}
+                    <p className="mt-2 text-xs text-text-muted">{t("board.rerunEstimateNote")}</p>
+                  </div>
                 )}
-                <p className="mt-2 text-xs text-text-muted">{t("board.rerunEstimateNote")}</p>
-              </div>
+              </>
             )}
           </div>
         )}
