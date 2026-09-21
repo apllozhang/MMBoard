@@ -22,9 +22,24 @@ function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/** R06/R15:模拟数据、采样覆盖、输出截断——任一情况全程醒目标识(含移动端,不隐藏) */
+function noticeBannerHtml(meta, a) {
+  const tags = [];
+  if (meta.transcriptionMode === "mock") tags.push("转写为演示模拟数据");
+  if (meta.analysisMode === "mock") tags.push("AI 分析为演示模拟数据");
+  if (a && a.samplingTruncated) tags.push("分析基于转写采样(非全文,中段未覆盖)");
+  if (a && a.partial) tags.push("AI 输出被截断,本纪要为部分结果");
+  if (!tags.length) return "";
+  const label = tags.some((x) => x.includes("演示")) ? "演示数据" : "内容完整性提示";
+  return `<div class="mock-banner" role="note">⚠ ${esc(label)}:${tags.map(esc).join(";")}</div>`;
+}
+
 /** 生成纪要 HTML。返回 { html, fileName } */
+const { normalizeAnalysis } = require("./llm.cjs");
+
 function renderMinutes({ analysis, meta }) {
-  const a = analysis;
+  // R14 防御深度:无论来源,渲染前统一规范化(类型不符纠正、缺失补空),模板永不因字段异常崩溃
+  const a = normalizeAnalysis(analysis);
   const date = meta.date;                          // YYYY-MM-DD
   const stamp = date.replace(/-/g, "");            // YYYYMMDD
   const slug = (a.title || "meeting-minutes").replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 30).replace(/^-|-$/g, "") || "meeting-minutes";
@@ -152,7 +167,7 @@ ${talk.map((x) => `                <tr><td>${esc(x.speaker)}</td><td class="num"
   const actionRows = (a.actions || []).map((x) => `
           <tr>
             <td>${esc(x.owner || "—")}</td>
-            <td>${esc(x.item)}</td>
+            <td>${esc(x.item)}${x.quote ? `<span class="quote-src">依据原文:「${esc(x.quote)}」</span>` : ""}</td>
             <td>${esc(x.due || "—")}</td>
           </tr>`).join("\n");
 
@@ -166,7 +181,10 @@ ${(a.risks || []).map((r) => `          <li>${esc(r)}</li>`).join("\n")}
       </section>`
     : "";
 
-  const mockTag = a.mock ? '<span class="badge-warn">模拟数据</span>' : "";
+  // R06/R15:分析或转写任一环节为模拟、或结果不完整,即全程醒目标识
+  const isMock = !!(a.mock || meta.transcriptionMode === "mock" || meta.analysisMode === "mock");
+  const mockTag = isMock ? '<span class="badge-warn">模拟数据</span>' : "";
+  const mockBanner = noticeBannerHtml(meta, a);
 
   return {
     fileName,
@@ -305,9 +323,14 @@ footer .tm{margin:0 0 4px}
   .hero{padding:36px 16px}
   .hero h1{font-size:26px}
 }
+  .quote-src{display:block;margin-top:3px;font-size:12px;color:var(--color-text-muted)}
+  .mock-banner{background:var(--status-warning-bg);color:var(--status-warning-text);font-weight:600;
+    padding:10px 16px;text-align:center;font-size:13.5px;border-bottom:1px solid var(--color-border)}
+  @media (max-width:560px){.mock-banner{font-size:12.5px;padding:9px 10px}}
 </style>
 </head>
 <body>
+${mockBanner}
 <header class="topbar">
   <img src="${logoB64("ale-logo.png")}" alt="Alcatel-Lucent Enterprise" class="logo-light">
   <img src="${logoB64("ale-logo-white.png")}" alt="" class="logo-dark">
@@ -339,7 +362,7 @@ footer .tm{margin:0 0 4px}
     <h1>${esc(a.title || "会议纪要")}</h1>
     <p>${esc(a.summary || "")}</p>
     <div class="meta">
-      <span>会议日期:${esc(meta.date)}</span>
+      <span>生成日期:${esc(meta.date)}</span>
       <span>来源:${esc(meta.fileName)}</span>
       <span>转写:${esc(String(meta.transcriptChars))} 字</span>
     </div>

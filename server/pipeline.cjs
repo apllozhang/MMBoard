@@ -32,8 +32,28 @@ const hasFfmpeg = (() => {
   catch { return false; }
 })();
 
-function loadTasks() { return JSON.parse(fs.readFileSync(TASKS_FILE, "utf8")); }
-function saveTasks(tasks) { fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2)); }
+/** R09 原子写 JSON:临时文件 + 同盘 rename;写入前保留一份 .bak */
+function writeJsonAtomic(file, obj) {
+  const tmp = file + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+  try { if (fs.existsSync(file)) fs.copyFileSync(file, file + ".bak"); } catch { /* best effort */ }
+  fs.renameSync(tmp, file);
+}
+
+function loadTasks() {
+  try { return JSON.parse(fs.readFileSync(TASKS_FILE, "utf8")); }
+  catch (e) {
+    // R09:主文件损坏时回退 .bak,两者皆坏才报错(明确区分损坏与不存在)
+    try {
+      const bak = JSON.parse(fs.readFileSync(TASKS_FILE + ".bak", "utf8"));
+      console.error("[pipeline] tasks.json 损坏,已从 .bak 恢复:", e.message);
+      return bak;
+    } catch {
+      throw new Error(`任务数据不可读(tasks.json 与备份均无法解析): ${e.message}`);
+    }
+  }
+}
+function saveTasks(tasks) { writeJsonAtomic(TASKS_FILE, tasks); }
 
 function newStep(key, label) { return { key, label, status: "pending", startedAt: null, finishedAt: null, note: "" }; }
 
@@ -52,7 +72,7 @@ function recordQuota(seconds) {
   let q = {};
   try { q = JSON.parse(fs.readFileSync(QUOTA_FILE, "utf8")); } catch { /* 首日记账 */ }
   q[day] = Math.round(((q[day] || 0) + seconds) * 10) / 10;
-  fs.writeFileSync(QUOTA_FILE, JSON.stringify(q, null, 2));
+  writeJsonAtomic(QUOTA_FILE, q);
   return q[day];
 }
 
@@ -83,6 +103,54 @@ function setStep(taskId, runId, key, status, note = "") {
   if (status === "running") s.startedAt = new Date().toISOString();
   if (status === "done" || status === "skipped" || status === "failed") s.finishedAt = new Date().toISOString();
   saveTasks(tasks);
+}
+
+/** R08 全局串行任务队列:一次只跑一个任务(转写/分析是重资源操作);容量 10,超出拒绝 */
+const taskQueue = [];
+let queueDraining = false;
+const QUEUE_CAPACITY = 10;
+
+/** 入队;队列满抛错(调用方转 503) */
+function enqueuePipeline(task, secret, opts = {}) {
+  if (taskQueue.length >= QUEUE_CAPACITY) {
+    throw new Error("任务队列已满(10 个),请等当前任务完成后再试");
+  }
+  taskQueue.push({ task, secret, opts });
+  drainQueue();
+}
+
+function drainQueue() {
+  if (queueDraining) return;
+  const item = taskQueue.shift();
+  if (!item) return;
+  queueDraining = true;
+  Promise.resolve(runPipeline(item.task, item.secret, item.opts))
+    .catch((e) => console.error(`[${item.task.id}] 队列执行异常:`, e.message))
+    .finally(() => { queueDraining = false; drainQueue(); });
+}
+
+/** R08 服务重启恢复:启动时把"运行中"任务标记为中断(队列未持久化,这些任务已失去执行者) */
+function recoverInterruptedTasks() {
+  const RUNNING = new Set(["queued", "extracting", "transcribing", "analyzing", "rendering"]);
+  const tasks = loadTasks();
+  let n = 0;
+  for (const t of tasks) {
+    if (!RUNNING.has(t.stage)) continue;
+    t.stage = "failed";
+    t.error = "服务重启,任务中断——请使用「重新跑」继续(已有转写文本的任务只会重跑分析)";
+    for (const s of t.steps) {
+      if (s.status === "running" || s.status === "pending") {
+        s.status = "failed";
+        s.note = "服务重启中断";
+        s.finishedAt = new Date().toISOString();
+      }
+    }
+    n += 1;
+  }
+  if (n) {
+    saveTasks(tasks);
+    console.log(`[pipeline] 启动恢复:标记 ${n} 个中断任务为 failed`);
+  }
 }
 
 const STAGE_OF = { extract: "extracting", transcribe: "transcribing", analyze: "analyzing", render: "rendering" };
@@ -167,7 +235,7 @@ async function runPipeline(task, secret, opts = {}) {
       return;
     }
 
-    await analyzeAndRender(task, secret, log, { text, segments, hasSpeakers });
+    await analyzeAndRender(task, secret, log, { text, segments, hasSpeakers, transcriptionMode: task.transcriptionMode || "unknown" });
   } catch (e) {
     if (e instanceof RunSupersededError) { log("运行实例已被取代,本次执行退出"); return; }
     failTask(task, e);
@@ -214,8 +282,10 @@ async function runFromExtract(task, secret, log) {
       : await transcribe(audioPath, secret.iflytek || {}, log);
     checkRunAlive(task.id, task.runId);   // 长转写返回后:实例已被取代则不再写状态/落盘/调用 LLM
     if (!text || text.length < 10) throw new Error("转写结果为空或过短");
+    // R06:转写模式入档(mock 数据不得伪装真实纪要)
+    const transcriptionMode = useLocal ? "local" : (trMock ? "mock" : "iflytek");
     setStep(task.id, task.runId, "transcribe", "done", `${text.length} 字${useLocal ? "(本地)" : trMock ? "(mock)" : ""}`);
-    updateTask(task.id, task.runId, { transcriptChars: text.length });
+    updateTask(task.id, task.runId, { transcriptChars: text.length, transcriptionMode });
 
     /* 真实转写记账:仅讯飞通道(本地转写不耗额度)。失败不影响任务 */
     if (!trMock && !useLocal) {
@@ -234,7 +304,7 @@ async function runFromExtract(task, secret, log) {
         JSON.stringify({ text, segments: segments || [], hasSpeakers: !!hasSpeakers }, null, 2));
     } catch (e) { log("转写文本落盘失败(不影响本次任务):", e.message); }
 
-    await analyzeAndRender(task, secret, log, { text, segments, hasSpeakers });
+    await analyzeAndRender(task, secret, log, { text, segments, hasSpeakers, transcriptionMode: useLocal ? "local" : (trMock ? "mock" : "iflytek") });
   } catch (e) {
     if (e instanceof RunSupersededError) { log("运行实例已被取代,本次执行退出"); return; }
     failTask(task, e);
@@ -242,7 +312,7 @@ async function runFromExtract(task, secret, log) {
 }
 
 /** analyze + render 段(两种入口共用) */
-async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers }) {
+async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers, transcriptionMode = "iflytek" }) {
   try {
 
     /* 说话人发言时长统计(真实数据:来自讯飞时间戳分段) */
@@ -274,7 +344,9 @@ async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers
     fs.mkdirSync(outDir, { recursive: true });
     const { html, fileName } = renderMinutes({
       analysis,
-      meta: { date: task.createdAt.slice(0, 10), fileName: task.originalFileName || task.fileName, transcriptChars: text.length, talkStats },
+      meta: { date: task.createdAt.slice(0, 10), fileName: task.originalFileName || task.fileName,
+              transcriptChars: text.length, talkStats,
+              transcriptionMode, analysisMode: analysis.mock ? "mock" : "real" },
     });
     fs.writeFileSync(path.join(outDir, fileName), html, "utf8");
     setStep(task.id, task.runId, "render", "done", fileName);
@@ -305,4 +377,4 @@ function failTask(task, e) {
   saveTasks(tasks);
 }
 
-module.exports = { createTask, loadTasks, runPipeline, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota };
+module.exports = { createTask, loadTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, QUEUE_CAPACITY, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT };

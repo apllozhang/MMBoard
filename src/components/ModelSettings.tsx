@@ -137,6 +137,12 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
       const masked = draft.apiKey.includes("****");
       if (masked) {
         if (!known) { toast("error", t("settings.needKey")); return; }
+        // R21:草稿改了地址/模型而密钥仍是打码 → 只能测到旧配置,提示先保存
+        const saved = payload?.models.find((m) => m.id === draft.id);
+        if (saved && (saved.baseUrl !== draft.baseUrl || saved.model !== draft.model || saved.provider !== draft.provider)) {
+          toast("error", t("settings.testStaleDraft"));
+          return;
+        }
         const r = await testSavedModel(draft.id);       // 未改密钥 → 测已存条目
         toast(r.ok ? "success" : "error", r.ok ? `${t("settings.testOk")} · ${r.ms}ms` : `${t("settings.testFail")} · ${r.message || ""}`);
       } else {

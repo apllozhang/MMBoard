@@ -92,6 +92,7 @@ export const en = {
     testOk: "Connected",
     testFail: "Connection failed",
     needKey: "Enter an API key before testing",
+    testStaleDraft: "Draft changed the URL/model — a masked key can't be tested against new config. Save first, then test.",
     del: "Delete",
     confirm: "Confirm?",
     deleted: "Model deleted",

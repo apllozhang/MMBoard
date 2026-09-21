@@ -42,7 +42,7 @@ export default function MeetingBoardPage() {
   const [tasks, setTasks] = useState<MeetingTask[]>([]);
   const [meta, setMeta] = useState<ServerMeta | null>(null);
   const [error, setError] = useState(false);
-  const [detail, setDetail] = useState<MeetingTask | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<MeetingTask | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [rerunPreview, setRerunPreview] = useState<RerunPreview | null>(null);
@@ -52,13 +52,22 @@ export default function MeetingBoardPage() {
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<number | null>(null);
+  const inFlightRef = useRef(false);   // R20:上一轮轮询未完成则跳过,防请求堆积
+
+  // R20:详情只存 taskId,内容从最新任务列表派生——弹窗随轮询实时更新
+  const detail = useMemo(() => tasks.find((x) => x.id === detailId) ?? null, [tasks, detailId]);
 
   const locale = i18n.language === "en" ? "en-US" : "zh-CN";
   const fmtTime = (iso: string) =>
     new Date(iso).toLocaleString(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 
   const load = useCallback(() => {
-    fetchTasks().then((x) => { setTasks(x); setError(false); }).catch(() => setError(true));
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    fetchTasks()
+      .then((x) => { setTasks(x); setError(false); })
+      .catch(() => setError(true))
+      .finally(() => { inFlightRef.current = false; });
   }, []);
 
   useEffect(() => {
@@ -99,7 +108,7 @@ export default function MeetingBoardPage() {
     try {
       await restartTask(id, scope);
       toast("success", t("board.restarted"));
-      setDetail(null);
+      setDetailId(null);
       setRerunPreview(null);
       load();
       // 重跑期间快轮询,让进度尽快可见
@@ -206,7 +215,7 @@ export default function MeetingBoardPage() {
       await deleteTask(pendingDelete.id);
       toast("success", t("board.deleted"));
       setPendingDelete(null);
-      setDetail(null);
+      setDetailId(null);
       load();
     } catch (e) {
       toast("error", (e as Error).message);
@@ -258,7 +267,7 @@ export default function MeetingBoardPage() {
         return (
           <div className="flex items-center gap-1.5">
             <button type="button" className="btn btn-secondary btn-sm whitespace-nowrap" aria-haspopup="dialog"
-                    onClick={() => setDetail(row)}>
+                    onClick={() => setDetailId(row.id)}>
               {t("board.detail")}
             </button>
             {hasMinutes && (
@@ -421,11 +430,11 @@ export default function MeetingBoardPage() {
       </Dialog>
 
       {/* 流水线时间线弹层(D1-D5 由 Dialog 组件统一实现) */}
-      <Dialog open={detail !== null} onClose={() => setDetail(null)}
+      <Dialog open={detail !== null} onClose={() => setDetailId(null)}
               title={`${t("board.detailTitle")} · ${detail?.id ?? ""}`}
               footer={
                 <>
-                  <button className="btn btn-secondary" onClick={() => setDetail(null)}>{t("table.cancel")}</button>
+                  <button className="btn btn-secondary" onClick={() => setDetailId(null)}>{t("table.cancel")}</button>
                   {detail && (detail.stage === "done" || detail.stage === "failed") && detail.hasSource !== false && (
                     <button className={`btn ${detail.hasTranscript ? "btn-secondary" : "btn-primary"}`}
                             title={t("board.rerunAllTip")}

@@ -12,7 +12,8 @@ const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const auth = require("./auth.cjs");
-const { createTask, loadTasks, runPipeline, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota } = require("./pipeline.cjs");
+const { createTask, loadTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, QUEUE_CAPACITY,
+        DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
 
 /** 每日转写免费额度基准(秒):讯飞 lfasr 普遍规则为每日约 2 小时,可在 data/settings.json
  *  加 "asrDailyQuotaSeconds": <秒> 覆盖;余量提示始终为本地估算,以讯飞控制台为准 */
@@ -138,6 +139,12 @@ function fixMojibakeName(s) {
 }
 
 const upload = multer({
+  // R18:类型白名单在接收前拦截(不再先落盘后报错)——fileFilter 是 multer 顶层参数
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    if (AUDIO_EXT.has(ext) || VIDEO_EXT.has(ext)) return cb(null, true);
+    cb(new Error(`不支持的文件类型: ${ext || "(无扩展名)"}(支持音频 mp3/wav/m4a/aac 等,视频 mp4/mov/mkv 等)`));
+  },
   storage: multer.diskStorage({
     destination: UPLOADS,
     // R01:uploads 内使用唯一存储键,与用户原始文件名解耦——同名上传互不覆盖;
@@ -305,7 +312,8 @@ app.put("/api/settings", (req, res) => {
   if (iflytek.appId && (!iflytek.apiKey || !iflytek.apiSecret)) {
     return res.status(400).json({ error: "讯飞参数需同时填写 appId、apiKey、apiSecret" });
   }
-  saveSettings({ activeId, models, asr, iflytek });
+  // R22:已知字段更新,保留 settings 里其他字段(如 asrDailyQuotaSeconds)
+  saveSettings({ ...prev, activeId, models, asr, iflytek });
   audit(req, "settings.save", `models=${models.length} asr=${asr.provider} iflytek=${iflytek.appId ? "set" : "empty"}`);
   res.json({ ok: true, activeId, count: models.length, asr, iflytek: { appId: iflytek.appId, apiKey: maskKey(iflytek.apiKey), apiSecret: maskKey(iflytek.apiSecret) } });
 });
@@ -407,11 +415,30 @@ app.get("/api/tasks/:id", (req, res) => {
 
 app.post("/api/tasks", upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "缺少文件字段 file" });
+  // R18:上传限流(每 IP 每分钟 6 次);超限删除本次落盘文件
+  if (!rateLimit(`upload:${req.ip || "?"}`, 6, 60000)) {
+    try { fs.rmSync(req.file.path); } catch { /* best effort */ }
+    return res.status(429).json({ error: "上传过于频繁,请稍后再试" });
+  }
   // R01:req.file.filename=唯一存储键;originalname 另存为展示用原始名(同名上传各自独立)
   const originalName = fixMojibakeName(req.file.originalname).replace(/[\\/:*?"<>|]/g, "_");
-  const task = createTask(req.file.filename, originalName, req.file.size);
+  let task;
+  try {
+    task = createTask(req.file.filename, originalName, req.file.size);
+  } catch (e) {
+    try { fs.rmSync(req.file.path); } catch { /* best effort */ }   // R18:建任务失败不留孤文件
+    return res.status(503).json({ error: e.message });
+  }
   audit(req, "task.create", `${task.id} ${originalName}`);
-  runPipeline(task, loadSecret());   // 异步跑流水线,状态轮询看板自取
+  // R08:全局串行队列(容量 10),满则 503 并清理本次文件
+  try {
+    enqueuePipeline(task, loadSecret());
+  } catch (e) {
+    try { fs.rmSync(req.file.path); } catch { /* best effort */ }
+    const tasks = loadTasks();
+    fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks.filter((x) => x.id !== task.id), null, 2));
+    return res.status(503).json({ error: e.message });
+  }
   res.status(201).json(task);
 });
 
@@ -477,7 +504,12 @@ app.post("/api/tasks/:id/restart", (req, res) => {
   t.error = "";
   t.runId = require("crypto").randomUUID();   // 新运行实例:旧执行写入会被 runId 校验拒绝
   fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
-  runPipeline(t, loadSecret(), transcript ? { transcript } : {});
+  // R08:重跑同样入队(串行,不与当前任务抢资源)
+  try {
+    enqueuePipeline(t, loadSecret(), transcript ? { transcript } : {});
+  } catch (e) {
+    return res.status(503).json({ error: e.message });
+  }
   res.json(t);
 });
 
@@ -532,6 +564,15 @@ app.get("/api/tasks/:id/minutes", (req, res) => {
 /* ── SPA ── */
 app.use(express.static(DIST));
 app.get(/^\/(?!api|outputs).*/, (_req, res) => res.sendFile(path.join(DIST, "index.html")));
+
+/* R08:启动恢复——把上次运行中(失去执行者)的任务标记为中断 */
+recoverInterruptedTasks();
+
+/* R18:multer/业务错误的统一转换(fileFilter 抛出的类型错误 → 400) */
+app.use((err, _req, res, _next) => {
+  const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+  res.status(status).json({ error: err.message || "请求处理失败" });
+});
 
 app.listen(PORT, () => {
   console.log(`[symphony-console] server on http://127.0.0.1:${PORT}`);

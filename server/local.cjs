@@ -44,8 +44,9 @@ async function transcribe(audioPath, cfg = {}, log = () => {}) {
   }
   log("已提交本地转写:", sub.id);
 
-  /* 轮询 */
+  /* 轮询(单次查询失败有限容错,连续 3 次才判失败;总超时见下) */
   const t0 = Date.now();
+  let pollErrors = 0;
   for (;;) {
     await new Promise((r) => setTimeout(r, POLL_MS));
     const pctl = new AbortController();
@@ -53,8 +54,15 @@ async function transcribe(audioPath, cfg = {}, log = () => {}) {
     let st;
     try {
       const r = await fetch(`${base}/tasks/${sub.id}`, { signal: pctl.signal });
+      clearTimeout(ptimer);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       st = await r.json();
+      pollErrors = 0;
+    } catch (e) {
+      clearTimeout(ptimer);
+      if (++pollErrors >= 3) throw new Error(`本地转写轮询连续 ${pollErrors} 次失败: ${e.message}`);
+      log(`本地转写轮询异常(${pollErrors}/3),继续重试:`, e.message);
+      continue;
     } finally {
       clearTimeout(ptimer);
     }

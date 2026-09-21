@@ -28,8 +28,19 @@ function makeSigna(appId, secretKey) {
   return { ts, signa };
 }
 
+/** R17:单请求超时(30s),防止讯飞接口挂起拖死任务 */
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 30000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try { return await fetch(url, { ...opts, signal: ctl.signal }); }
+  catch (e) {
+    if (e.name === "AbortError") throw new Error(`讯飞请求超时(${timeoutMs / 1000}s): ${url}`);
+    throw e;
+  } finally { clearTimeout(t); }
+}
+
 async function postForm(ep, params) {
-  const res = await fetch(`${BASE}/${ep}`, {
+  const res = await fetchWithTimeout(`${BASE}/${ep}`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
     body: new URLSearchParams(params).toString(),
@@ -48,11 +59,11 @@ async function uploadSlice(appId, secretKey, taskId, sliceId, content) {
     Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
   parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="content"; filename="slice"\r\nContent-Type: application/octet-stream\r\n\r\n`));
   parts.push(content, Buffer.from(`\r\n--${boundary}--\r\n`));
-  const res = await fetch(`${BASE}/upload`, {
+  const res = await fetchWithTimeout(`${BASE}/upload`, {
     method: "POST",
     headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
     body: Buffer.concat(parts),
-  });
+  }, 10 * 60 * 1000);   // 大分片上传给足时间
   if (!res.ok) throw new Error(`讯飞 upload HTTP ${res.status}`);
   return res.json();
 }

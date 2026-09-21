@@ -92,6 +92,7 @@ export const zh = {
     testOk: "连通正常",
     testFail: "连接失败",
     needKey: "请先填写 API Key 再测试",
+    testStaleDraft: "草稿修改了地址或模型,打码密钥无法用于新配置——请先保存再测试",
     del: "删除",
     confirm: "确认删除?",
     deleted: "模型已删除",
