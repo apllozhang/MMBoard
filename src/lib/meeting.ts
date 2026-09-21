@@ -176,6 +176,30 @@ export function taskProgress(t: MeetingTask): { pct: number; running: boolean } 
   return { pct: Math.min(99, Math.round(pct)), running: t.stage !== "failed" };
 }
 
+/** 说话人标注:读取编号列表与已存映射 */
+export async function fetchSpeakers(id: string): Promise<{ speakers: string[]; map: Record<string, string>; hasAnalysis: boolean }> {
+  const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/speakers`);
+  handle401(res);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json() as Promise<{ speakers: string[]; map: Record<string, string>; hasAnalysis: boolean }>;
+}
+
+/** 保存说话人映射;有可复用分析时服务端纯重渲染纪要 */
+export async function saveSpeakers(id: string, map: Record<string, string>): Promise<{ ok: boolean; rerendered: boolean; message?: string }> {
+  const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/speakers`, {
+    method: "PUT",
+    headers: CSRF,
+    body: JSON.stringify({ map }),
+  });
+  handle401(res);
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json() as Promise<{ ok: boolean; rerendered: boolean; message?: string }>;
+}
+
 /** 纪要下载(Attachment,浏览器直接落盘;无需打开新页) */
 export const minutesDownloadUrl = (id: string) => `/api/tasks/${encodeURIComponent(id)}/minutes/download`;
 /** 纪要在线查看(R04:受认证保护,不再走静态 /outputs) */

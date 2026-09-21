@@ -349,6 +349,13 @@ async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers
               transcriptionMode, analysisMode: analysis.mock ? "mock" : "real" },
     });
     fs.writeFileSync(path.join(outDir, fileName), html, "utf8");
+    // 说话人标注纯重渲染的依据:分析结果 + 发言统计 + 渲染元信息落盘
+    fs.writeFileSync(path.join(outDir, "analysis.json"), JSON.stringify({
+      analysis,
+      talkStats,
+      meta: { date: task.createdAt.slice(0, 10), fileName: task.originalFileName || task.fileName,
+              transcriptChars: text.length, transcriptionMode, analysisMode: analysis.mock ? "mock" : "real" },
+    }, null, 2));
     setStep(task.id, task.runId, "render", "done", fileName);
     updateTask(task.id, task.runId, { stage: "done", title: analysis.title || task.title, minutesFile: `${task.id}/${fileName}` });
     log("流水线完成 →", fileName);

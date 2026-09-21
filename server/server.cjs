@@ -12,6 +12,7 @@ const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const auth = require("./auth.cjs");
+const { renderMinutes } = require("./minutes-template.cjs");
 const { createTask, loadTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, QUEUE_CAPACITY,
         DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
 
@@ -511,6 +512,9 @@ app.post("/api/tasks/:id/restart", (req, res) => {
     if (!transcript || !transcript.text || String(transcript.text).length < 10) {
       return res.status(400).json({ error: "已存转写文本为空,请用「整条重跑」" });
     }
+    // 说话人标注应用:GLM 拿到的即真实姓名(person 归属更准)
+    const smap = transcript.speakerMap || {};
+    if (Object.keys(smap).length) transcript.text = applyMapToText(transcript.text, smap);
   }
 
   t.steps.forEach((s) => { s.status = "pending"; s.note = ""; s.startedAt = null; s.finishedAt = null; });
@@ -525,6 +529,100 @@ app.post("/api/tasks/:id/restart", (req, res) => {
     return res.status(503).json({ error: e.message });
   }
   res.json(t);
+});
+
+/* ── 说话人手动标注(R15 人工确认):映射存 transcript.json 与 task,
+      「重新跑分析」自动应用真名;有 analysis.json 时可纯重渲染(零额度零耗时) ── */
+function applyMapToText(text, map) {
+  const keys = Object.keys(map).sort((a, b) => Number(b) - Number(a));   // 长编号优先,防 1 吞 10
+  for (const k of keys) text = text.split(`说话人${k}`).join(map[k]);
+  return text;
+}
+
+function applySpeakerMapDeep(obj, map) {
+  if (typeof obj === "string") return applyMapToText(obj, map);
+  if (Array.isArray(obj)) return obj.map((x) => applySpeakerMapDeep(x, map));
+  if (obj && typeof obj === "object") {
+    const out = {};
+    for (const k of Object.keys(obj)) out[k] = applySpeakerMapDeep(obj[k], map);
+    return out;
+  }
+  return obj;
+}
+
+function rebuildTalkStats(segments, hasSpeakers, map = {}) {
+  if (!hasSpeakers || !Array.isArray(segments) || !segments.length) return [];
+  const acc = new Map();
+  for (const s of segments) {
+    const sp = String(s.speaker ?? "?");
+    acc.set(sp, (acc.get(sp) || 0) + Math.max(0, (s.end || 0) - (s.start || 0)));
+  }
+  const total = [...acc.values()].reduce((a, b) => a + b, 0) || 1;
+  return [...acc.entries()]
+    .map(([speaker, ms]) => ({ speaker: map[String(speaker)] || `说话人${speaker}`,
+                               ms, pct: Math.round((ms / total) * 1000) / 10 }))
+    .sort((a, b) => b.ms - a.ms);
+}
+
+app.get("/api/tasks/:id/speakers", (req, res) => {
+  const t = loadTasks().find((x) => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: "task not found" });
+  const tp = path.join(OUTPUTS, t.id, "transcript.json");
+  if (!fs.existsSync(tp)) return res.status(404).json({ error: "该任务没有已保存的转写文本" });
+  let tr;
+  try { tr = JSON.parse(fs.readFileSync(tp, "utf8")); }
+  catch { return res.status(500).json({ error: "转写文本读取失败" }); }
+  const speakers = [...new Set((tr.segments || []).map((x) => String(x.speaker ?? "?")))].filter((x) => x !== "?");
+  res.json({
+    speakers,
+    map: (tr.speakerMap || t.speakerMap || {}),
+    hasAnalysis: fs.existsSync(path.join(OUTPUTS, t.id, "analysis.json")),
+  });
+});
+
+app.put("/api/tasks/:id/speakers", (req, res) => {
+  const t = loadTasks().find((x) => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: "task not found" });
+  const map = {};
+  for (const [k, v] of Object.entries(req.body?.map || {})) {
+    if (/^\d+$/.test(String(k)) && typeof v === "string" && v.trim()) {
+      map[String(k)] = v.trim().slice(0, 30);   // 姓名限 30 字符
+    }
+  }
+  const tp = path.join(OUTPUTS, t.id, "transcript.json");
+  if (!fs.existsSync(tp)) return res.status(404).json({ error: "该任务没有已保存的转写文本" });
+  let tr;
+  try { tr = JSON.parse(fs.readFileSync(tp, "utf8")); }
+  catch { return res.status(500).json({ error: "转写文本读取失败" }); }
+
+  tr.speakerMap = map;   // 原始文本与编号不动,map 可反复修改
+  fs.writeFileSync(tp, JSON.stringify(tr, null, 2));
+  const tasks = loadTasks();
+  const t2 = tasks.find((x) => x.id === t.id);
+  if (t2) { t2.speakerMap = map; t2.updatedAt = new Date().toISOString(); fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2)); }
+  audit(req, "task.speakers", `${t.id} ${JSON.stringify(map)}`);
+
+  // 纯重渲染:有 analysis.json 才能只重渲染(否则提示先重跑分析)
+  const ap = path.join(OUTPUTS, t.id, "analysis.json");
+  if (!fs.existsSync(ap)) {
+    return res.json({ ok: true, map, rerendered: false,
+      message: "已保存标注;该任务暂无可复用的分析结果,请点「重新跑分析」生成后再标注生效" });
+  }
+  const saved = JSON.parse(fs.readFileSync(ap, "utf8"));
+  const analysis2 = applySpeakerMapDeep(saved.analysis, map);
+  const talkStats = rebuildTalkStats(tr.segments, tr.hasSpeakers, map);
+  const { html, fileName } = renderMinutes({
+    analysis: analysis2,
+    meta: { ...saved.meta, talkStats },
+  });
+  fs.writeFileSync(path.join(OUTPUTS, t.id, fileName), html, "utf8");
+  if (!t.minutesFile) {
+    t.minutesFile = `${t.id}/${fileName}`;
+    const tasks2 = loadTasks();
+    const t3 = tasks2.find((x) => x.id === t.id);
+    if (t3 && !t3.minutesFile) { t3.minutesFile = t.minutesFile; t3.updatedAt = new Date().toISOString(); fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks2, null, 2)); }
+  }
+  res.json({ ok: true, map, rerendered: true, minutesFile: `${t.id}/${fileName}` });
 });
 
 /* ── 纪要下载(Attachment,文件名用会议标题) ── */

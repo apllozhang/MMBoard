@@ -19,6 +19,7 @@ import {
   STAGE_TONE, STEP_TONE, type MeetingTask, type ServerMeta, type Stage, type RerunPreview,
 } from "@/lib/meeting";
 import { LogoutButton } from "@/components/AuthGate";
+import { SpeakerLabels } from "@/components/SpeakerLabels";
 
 const STAGES: Stage[] = ["queued", "extracting", "transcribing", "analyzing", "rendering", "done", "failed"];
 
@@ -490,6 +491,9 @@ export default function MeetingBoardPage() {
                    role="alert">
                 {detail.error}
               </div>
+            )}
+            {detail.hasTranscript && (detail.stage === "done" || detail.stage === "failed") && (
+              <SpeakerLabels taskId={detail.id} onRerendered={load} />
             )}
           </div>
         )}
