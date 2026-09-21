@@ -1,0 +1,68 @@
+{
+  "generatedAt": "2026-09-21T15:03:40.191Z",
+  "node": "v24.15.0",
+  "platform": "Windows_NT x64 (12 cores)",
+  "note": "GET /api/tasks 全量返回 + 每条文件存在性检查;JSON 整文件写。基线冻结后再评估分页/摘要/增量事件。",
+  "results": [
+    {
+      "tasks": 100,
+      "tasksFileKB": 159.2,
+      "api": {
+        "p50": 11.5,
+        "p95": 22.15,
+        "p99": 32.44,
+        "mean": 12.22,
+        "bodyKB": 115
+      },
+      "eventLoopLagMs": {
+        "mean": 15.816,
+        "p99": 29.852
+      },
+      "memoryMB": {
+        "rss": 85.3,
+        "heapUsed": 22.1
+      },
+      "saveTasksWriteMs": 3.53
+    },
+    {
+      "tasks": 1000,
+      "tasksFileKB": 1594.4,
+      "api": {
+        "p50": 66.34,
+        "p95": 111.51,
+        "p99": 120.66,
+        "mean": 72.27,
+        "bodyKB": 1153
+      },
+      "eventLoopLagMs": {
+        "mean": 71.616,
+        "p99": 119.996
+      },
+      "memoryMB": {
+        "rss": 231.1,
+        "heapUsed": 36.8
+      },
+      "saveTasksWriteMs": 11.65
+    },
+    {
+      "tasks": 10000,
+      "tasksFileKB": 15990.9,
+      "api": {
+        "p50": 575.93,
+        "p95": 618.58,
+        "p99": 653.38,
+        "mean": 579.64,
+        "bodyKB": 11576.8
+      },
+      "eventLoopLagMs": {
+        "mean": 283.287,
+        "p99": 610.271
+      },
+      "memoryMB": {
+        "rss": 325.6,
+        "heapUsed": 32.5
+      },
+      "saveTasksWriteMs": 84.84
+    }
+  ]
+}
