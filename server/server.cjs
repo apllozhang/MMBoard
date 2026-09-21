@@ -160,6 +160,20 @@ const upload = multer({
 
 app.use(express.json());
 
+/* 版本与健康信息(R10):不含任何密钥;匿名可查(供部署健康检查与一致性核对) */
+app.get("/api/version", (_req, res) => {
+  let pkg = {};
+  try { pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8")); } catch { /* 降级 */ }
+  res.json({
+    name: "mmboard",
+    version: pkg.version || "unknown",
+    commit: process.env.GIT_COMMIT || "unknown",
+    builtAt: process.env.BUILD_TIME || "unknown",
+    startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+    node: process.version,
+  });
+});
+
 /* ── R03 认证:除登录/状态外,全部 /api 需有效会话(注意 app.use 挂载下 req.path 为相对路径) ── */
 const AUTH_PUBLIC = new Set(["/auth/login", "/auth/status"]);
 app.use("/api", (req, res, next) => {
