@@ -9,6 +9,45 @@
 "use strict";
 const https = require("https");
 const http = require("http");
+const net = require("net");
+const dns = require("dns").promises;
+
+/* ── R05:LLM 地址白名单——协议/解析目的校验,默认拒绝私网与保留地址 ──
+ * 内网部署的本地模型(vLLM/Ollama)需在 settings.json 显式 "allowPrivateLlmHosts": true;
+ * 云元数据地址(169.254.169.254)无条件拒绝。原生 https.request 不跟随重定向,无跳转绕过。 */
+function isPrivateIp(ip) {
+  const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+  if (net.isIPv4(v4)) {
+    const [a, b] = v4.split(".").map(Number);
+    if (a === 127 || a === 10 || a === 0) return true;                 // 环回/私网/保留
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;                           // 链路本地/云元数据
+    return false;
+  }
+  if (net.isIPv6(ip)) return ip === "::1" || ip === "::" || /^(f[cd]|fe[89ab])/i.test(ip);
+  return false;
+}
+
+async function assertLlmUrl(urlStr, { allowPrivate = false } = {}) {
+  let u;
+  try { u = new URL(String(urlStr)); } catch { throw new Error("LLM 地址格式无效"); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("LLM 地址仅允许 http/https 协议");
+  if (/metadata/i.test(u.hostname)) throw new Error("LLM 地址指向云元数据端点,无条件拒绝");
+  let addrs;
+  if (net.isIP(u.hostname)) addrs = [u.hostname];
+  else {
+    try { addrs = (await dns.lookup(u.hostname, { all: true })).map((x) => x.address); }
+    catch (e) { throw new Error(`LLM 地址无法解析(${u.hostname}): ${e.message}`); }
+  }
+  if (addrs.some((ip) => ip === "169.254.169.254")) {
+    throw new Error("LLM 地址指向云元数据端点,无条件拒绝");
+  }
+  if (!allowPrivate && addrs.some(isPrivateIp)) {
+    throw new Error("LLM 地址解析到内网/保留地址,已拒绝;如确需内网模型服务,请在 settings.json 配置 allowPrivateLlmHosts: true");
+  }
+  return true;
+}
 
 /** POST JSON,空闲超时默认 20 分钟,返回 {status, text} */
 function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000) {
@@ -66,6 +105,7 @@ async function analyze(transcript, cfg, log = console.log) {
 }
 
 async function analyzeOnce(transcript, cfg, provider, log = console.log) {
+  await assertLlmUrl(cfg.baseUrl, { allowPrivate: !!cfg.allowPrivate });   // R05:发请求前校验地址
   samplingTruncatedFlag.value = false;
   const { prompt, truncated: samplingTruncated, coverage } = buildPrompt(transcript);
   const system = "你是专业的会议纪要分析师。只输出 JSON,不要输出任何其他文字。";
@@ -316,4 +356,4 @@ function mockAnalysis(transcript) {
   };
 }
 
-module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson };   // 后三者导出供回归测试
+module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson, assertLlmUrl, isPrivateIp };   // 后四者导出供回归测试

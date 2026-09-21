@@ -17,6 +17,7 @@ const { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverI
         DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
 const { hasKeys } = require("./iflytek.cjs");
 const { writeJsonAtomic, readJsonWithRecovery } = require("./persist.cjs");
+const { assertLlmUrl } = require("./llm.cjs");
 
 /** 每日转写免费额度基准(秒):讯飞 lfasr 普遍规则为每日约 2 小时,可在 data/settings.json
  *  加 "asrDailyQuotaSeconds": <秒> 覆盖;余量提示始终为本地估算,以讯飞控制台为准 */
@@ -101,7 +102,8 @@ function loadSecret() {
   const st = loadSettings();
   const act = (st.models || []).find((x) => x.id === st.activeId);
   if (act && act.apiKey && act.model && act.baseUrl) {
-    s.llm = { provider: act.provider, baseUrl: act.baseUrl, apiKey: act.apiKey, model: act.model };
+    s.llm = { provider: act.provider, baseUrl: act.baseUrl, apiKey: act.apiKey, model: act.model,
+              allowPrivate: !!st.allowPrivateLlmHosts };   // R05:内网 LLM 需显式放行
   }
   /* 转写通道:settings.asr 存在即生效(provider: iflytek | local);讯飞参数 settings 优先 */
   if (st.asr && st.asr.provider) s.asr = { provider: st.asr.provider, localUrl: st.asr.localUrl || "" };
@@ -115,6 +117,7 @@ function loadSecret() {
     s.iflytek = { ...(s.iflytek || {}), demo: true };
     if (s.llm) s.llm.demo = true;
   }
+  if (s.llm) s.llm.allowPrivate = !!st.allowPrivateLlmHosts;   // R05:回退路径同样受白名单开关控制
   return s;
 }
 
@@ -354,8 +357,9 @@ app.put("/api/settings", (req, res) => {
     apiKey: (typeof iflytekIn.apiKey === "string" && iflytekIn.apiKey.includes("****")) ? String(eff.apiKey || "") : String(iflytekIn.apiKey || "").trim(),
     apiSecret: (typeof iflytekIn.apiSecret === "string" && iflytekIn.apiSecret.includes("****")) ? String(eff.apiSecret || "") : String(iflytekIn.apiSecret || "").trim(),
   } : (prev.iflytek || { appId: String(eff.appId || ""), apiKey: String(eff.apiKey || ""), apiSecret: String(eff.apiSecret || "") });
-  if (iflytek.appId && (!iflytek.apiKey || !iflytek.apiSecret)) {
-    return res.status(400).json({ error: "讯飞参数需同时填写 appId、apiKey、apiSecret" });
+  // 转写真实签名仅需 appId+apiSecret;apiKey 为其他讯飞服务的可选项
+  if (iflytek.appId && !iflytek.apiSecret) {
+    return res.status(400).json({ error: "讯飞参数需填写 appId 与 apiSecret(apiKey 可选)" });
   }
   // R22:已知字段更新,保留 settings 里其他字段(如 asrDailyQuotaSeconds)
   saveSettings({ ...prev, activeId, models, asr, iflytek });
@@ -364,6 +368,10 @@ app.put("/api/settings", (req, res) => {
 });
 
 app.post("/api/settings/test", async (req, res) => {
+  // R05:测试接口限流 + 目的地址校验(与真实调用同一套白名单)
+  if (!rateLimit(`test-llm:${req.ip || "?"}`, 6, 60000)) {
+    return res.status(429).json({ ok: false, message: "测试过于频繁,请稍后再试" });
+  }
   const body = req.body || {};
   let cfg = null;
   if (body.id) {
@@ -375,6 +383,11 @@ app.post("/api/settings/test", async (req, res) => {
     return res.status(400).json({ ok: false, message: "配置不完整(需要 baseUrl / model / apiKey;若未修改密钥请使用已保存条目的测试)" });
   }
   const base = String(cfg.baseUrl).replace(/\/$/, "");
+  try {
+    await assertLlmUrl(base, { allowPrivate: !!loadSettings().allowPrivateLlmHosts });
+  } catch (e) {
+    return res.status(400).json({ ok: false, message: e.message });
+  }
   const provider = cfg.provider === "anthropic" ? "anthropic" : "openai";
   const t0 = Date.now();
   try {

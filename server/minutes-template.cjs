@@ -43,7 +43,7 @@ const { normalizeAnalysis } = require("./llm.cjs");
 function renderMinutes({ analysis, meta }) {
   // R14 防御深度:无论来源,渲染前统一规范化(类型不符纠正、缺失补空),模板永不因字段异常崩溃
   const a = normalizeAnalysis(analysis);
-  const date = meta.date;                          // YYYY-MM-DD
+  const date = meta.date || String(meta.generatedAt || "").slice(0, 10) || "unknown";   // YYYY-MM-DD(pipeline 必传;容错兜底)
   const stamp = date.replace(/-/g, "");            // YYYYMMDD
   const slug = (a.title || "meeting-minutes").replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 30).replace(/^-|-$/g, "") || "meeting-minutes";
   const fileName = `${slug}-v0.1-${stamp}.html`;   // 徽章与文件名一致(模板一约定)

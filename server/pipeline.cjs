@@ -34,7 +34,6 @@ const hasFfmpeg = (() => {
 })();
 
 function loadTasks() { return readJsonWithRecovery(TASKS_FILE); }
-function saveTasks(tasks) { writeJsonAtomic(TASKS_FILE, tasks); }function loadTasks() { return readJsonWithRecovery(TASKS_FILE); }
 function saveTasks(tasks) { writeJsonAtomic(TASKS_FILE, tasks); }
 
 function newStep(key, label) { return { key, label, status: "pending", startedAt: null, finishedAt: null, note: "" }; }

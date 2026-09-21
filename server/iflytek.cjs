@@ -21,10 +21,14 @@ const POLL_TIMEOUT = 30 * 60 * 1000;
  *  旧字段 secretKey 作为 apiSecret 的别名兼容。返回规范化配置。 */
 function normalizeCfg(cfg) {
   if (!cfg || typeof cfg !== "object") return { appId: "", apiKey: "", apiSecret: "" };
+  const trimReal = (v) => {
+    const s = String(v || "").trim();
+    return s.startsWith("在此") ? "" : s;   // example 占位符不算已配置
+  };
   return {
-    appId: String(cfg.appId || "").trim(),
-    apiKey: String(cfg.apiKey || "").trim(),
-    apiSecret: String(cfg.apiSecret || cfg.secretKey || "").trim(),
+    appId: trimReal(cfg.appId),
+    apiKey: trimReal(cfg.apiKey),
+    apiSecret: trimReal(cfg.apiSecret || cfg.secretKey),
     language: cfg.language,
     roleType: cfg.roleType,
     demo: !!cfg.demo,
@@ -33,7 +37,8 @@ function normalizeCfg(cfg) {
 
 function hasKeys(cfg) {
   const c = normalizeCfg(cfg);
-  return !!(c.appId && c.apiKey && c.apiSecret);
+  // 录音文件转写(lfasr)真实签名仅需 appId+apiSecret(secretKey);apiKey 为其他讯飞服务的可选项
+  return !!(c.appId && c.apiSecret);
 }
 
 function makeSigna(appId, apiSecret) {
@@ -201,4 +206,4 @@ function mockTranscript(audioPath) {
   ].map((s, i) => `${name} [00:${String(i * 45).padStart(2, "0")}] ${s}`).join("\n");
 }
 
-module.exports = { transcribe, hasKeys };
+module.exports = { transcribe, hasKeys, normalizeCfg };
