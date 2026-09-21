@@ -106,13 +106,14 @@ function sliceId(n) {
 /** 转写入口。返回 { text, mock } —— text 为按句换行的纯文本 */
 async function transcribe(audioPath, cfg, log = console.log) {
   const nc = normalizeCfg(cfg);
-  if (!hasKeys(nc)) {
-    // R06 复审:生产缺配置必须显式失败;mock 仅在显式 demo 开关(MMB_DEMO=1 或配置 demo:true)下允许
-    if (!nc.demo) {
-      throw new Error("讯飞转写未配置(appId/apiKey/apiSecret 不完整),且未开启演示模式(MMB_DEMO=1)——拒绝静默生成模拟内容");
-    }
-    log("[iflytek] 演示模式 → mock 转写");
+  if (nc.demo) {
+    // R06 复审:演示模式(MMB_DEMO=1 或配置 demo:true)语义 = 必定 mock,优先于真实配置(回归与演示环境因此完全确定)
+    log("[iflytek] 演示模式 → mock 转写(忽略真实配置)");
     return { text: mockTranscript(audioPath), mock: true };
+  }
+  if (!hasKeys(nc)) {
+    // R06 复审:生产缺配置必须显式失败,绝不静默生成模拟内容
+    throw new Error("讯飞转写未配置(appId/apiKey/apiSecret 不完整),且未开启演示模式(MMB_DEMO=1)——拒绝静默生成模拟内容");
   }
   const appId = nc.appId, secretKey = nc.apiSecret;
   const file = fs.readFileSync(audioPath);

@@ -85,6 +85,11 @@ function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000) {
  *  花在思考上(响应 0 字 stop=max_tokens),同输入重试即可成功 */
 async function analyze(transcript, cfg, log = console.log) {
   const provider = cfg?.provider === "anthropic" ? "anthropic" : "openai";
+  if (cfg?.demo) {
+    // R06 复审:演示模式语义 = 必定 mock,优先于真实配置(与讯飞通道口径一致)
+    log("[llm] 演示模式 → mock 分析(忽略真实配置)");
+    return { ...mockAnalysis(transcript), mock: true };
+  }
   const usable = cfg && cfg.baseUrl && cfg.apiKey && cfg.model && !cfg.apiKey.startsWith("在此");
   if (!usable) {
     log("[llm] 未配置 → mock 分析");

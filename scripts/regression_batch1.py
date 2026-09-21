@@ -30,7 +30,8 @@ def port_free(p):
 def req(path, method="GET", body=None, cookie=None, csrf=True):
     h = {}
     if cookie: h["Cookie"] = cookie
-    if body is not None:
+    if body is not None or method not in ("GET", "HEAD"):
+        # CSRF 中间件拦截所有非 GET(与是否带 body 无关;DELETE 也必须带头)
         h["Content-Type"] = "application/json"
         if csrf: h["X-Requested-With"] = "XMLHttpRequest"
     r = urllib.request.Request(BASE + path, method=method,
@@ -188,6 +189,8 @@ finally:
         os.rename(SECRET_BAK, SECRET)
 
 # ── 历史兼容 ──
+if os.path.exists(SECRET):
+    os.rename(SECRET, SECRET_BAK)   # 第三段同样隔离真实密钥(MMB_DEMO=1 下 demo 优先,理论不外呼;双保险)
 DATA3 = os.path.join(TEST, "verify3")
 os.makedirs(os.path.join(DATA3, "uploads"), exist_ok=True)
 json.dump([make_task(day, 1, stage="done")], open(os.path.join(DATA3, "tasks.json"), "w", encoding="utf-8"))
