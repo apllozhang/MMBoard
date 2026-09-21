@@ -118,51 +118,57 @@ function put(conn, local, remote) {
   await put(conn, TARGZ, "/home/alec/symphony.tgz");
   console.log("uploaded");
   for (const s of [
-    `mkdir -p ${REMOTE_DIR}`,
+    `rm -rf ${REMOTE_DIR} && mkdir -p ${REMOTE_DIR}`,
     `cd ${REMOTE_DIR} && tar -xzf /home/alec/symphony.tgz && mv deploy/Dockerfile .`,
   ]) {
     const r = await run(conn, s, true);
     if (r.code !== 0) { console.error("[deploy] unpack failed"); conn.end(); process.exit(1); }
   }
 
-  // ── 2. 构建候选镜像(退出码可靠) ──
+  // ── 2. 构建候选镜像(退出码可靠)——标签含 commit,另取不可变 imageID 用于运行与回滚 ──
   const build = await run(conn, `cd ${REMOTE_DIR} && docker build --build-arg GIT_COMMIT=${COMMIT} --build-arg BUILD_TIME="${BUILD_TIME}" -t ${IMAGE_CAND} .`, true);
   if (build.code !== 0) {
     console.error("[deploy] image build FAILED — 旧容器保持不动");
     conn.end(); process.exit(1);
   }
-  console.log("[deploy] candidate image built");
+  const imageId = (await run(conn, `docker inspect --format '{{.Id}}' ${IMAGE_CAND}`, true)).out.trim();
+  if (!imageId.startsWith("sha256:")) { console.error("[deploy] cannot resolve image ID"); conn.end(); process.exit(1); }
+  console.log("[deploy] candidate built:", imageId.slice(0, 24));
 
-  // ── 3. 候选容器(临时端口,不挂数据卷,纯启动验证) ──
+  // ── 3. 候选容器(临时端口,挂生产数据卷验证真实兼容) ──
   await run(conn, `docker rm -f ${NAME}-cand >/dev/null 2>&1 || true`, true);
-  const runCand = await run(conn, `docker run -d --name ${NAME}-cand -p ${CAND_PORT}:8080 ${IMAGE_CAND}`);
+  const runCand = await run(conn, `docker run -d --name ${NAME}-cand -p ${CAND_PORT}:8080 -v ${DATA_VOL}:/app/server/data ${imageId}`);
   if (runCand.code !== 0) { console.error("[deploy] candidate start FAILED — 旧容器保持不动"); conn.end(); process.exit(1); }
   await new Promise((r) => setTimeout(r, 4000));
-  const candHealth = await run(conn, `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${CAND_PORT}/api/version && echo && curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${CAND_PORT}/api/auth/status`, true);
-  if (candHealth.code !== 0 || !candHealth.out.includes("200")) {
-    console.error("[deploy] candidate health check FAILED — 删除候选,旧容器保持不动");
+  // R11:两个健康项分别断言 2xx(curl -f,不拼接 includes)
+  const h1 = await run(conn, `curl -sf -o /dev/null -w "%{http_code}" http://127.0.0.1:${CAND_PORT}/api/version`, true);
+  const h2 = await run(conn, `curl -sf -o /dev/null -w "%{http_code}" http://127.0.0.1:${CAND_PORT}/api/auth/status`, true);
+  const verBody = await run(conn, `curl -sf http://127.0.0.1:${CAND_PORT}/api/version`, true);
+  if (h1.code !== 0 || !/^2\d\d$/.test(h1.out.trim()) || h2.code !== 0 || !/^2\d\d$/.test(h2.out.trim()) || !verBody.out.includes(`"commit":"${COMMIT}"`)) {
+    console.error(`[deploy] candidate health FAILED (version=${h1.out.trim()} status=${h2.out.trim()}) — 删除候选,旧容器保持不动`);
     await run(conn, `docker rm -f ${NAME}-cand >/dev/null 2>&1 || true`, true);
     conn.end(); process.exit(1);
   }
-  console.log("[deploy] candidate healthy:", candHealth.out.trim());
+  console.log("[deploy] candidate healthy");
 
   // ── 4. 切换(记录旧镜像供回滚;切换后正式容器健康失败则回滚) ──
-  const oldImage = (await run(conn, `docker inspect --format '{{.Config.Image}}' ${NAME}`, true)).out.trim() || `${NAME}:latest`;
-  console.log("[deploy] rollback image:", oldImage);
+  // 旧容器运行镜像的不可变 ID(回滚依据;不依赖可变标签)
+  const oldImageId = (await run(conn, `docker inspect --format '{{.Image}}' ${NAME}`, true)).out.trim();
+  console.log("[deploy] rollback image ID:", oldImageId.slice(0, 24));
   await run(conn, `docker stop ${NAME} >/dev/null 2>&1 || true`, true);
   await run(conn, `docker rm ${NAME} >/dev/null 2>&1 || true`, true);
-  const runProd = await run(conn, `docker run -d --name ${NAME} -p ${PORT}:8080 -v ${DATA_VOL}:/app/server/data --restart unless-stopped ${IMAGE_CAND}`);
+  const runProd = await run(conn, `docker run -d --name ${NAME} -p ${PORT}:8080 -v ${DATA_VOL}:/app/server/data --restart unless-stopped ${imageId}`);
   if (runProd.code !== 0) {
-    console.error("[deploy] prod start FAILED — 回滚到旧镜像");
-    await run(conn, `docker run -d --name ${NAME} -p ${PORT}:8080 -v ${DATA_VOL}:/app/server/data --restart unless-stopped ${oldImage}`, true);
+    console.error("[deploy] prod start FAILED — 回滚到旧镜像 ID");
+    await run(conn, `docker run -d --name ${NAME} -p ${PORT}:8080 -v ${DATA_VOL}:/app/server/data --restart unless-stopped ${oldImageId}`, true);
     conn.end(); process.exit(1);
   }
   await new Promise((r) => setTimeout(r, 5000));
-  const prodHealth = await run(conn, `curl -s http://127.0.0.1:${PORT}/api/version`, true);
+  const prodHealth = await run(conn, `curl -sf http://127.0.0.1:${PORT}/api/version`, true);
   if (prodHealth.code !== 0 || !prodHealth.out.includes(`"commit":"${COMMIT}"`)) {
-    console.error("[deploy] prod health/version FAILED — 回滚到旧镜像");
+    console.error("[deploy] prod health/version FAILED — 回滚到旧镜像 ID");
     await run(conn, `docker rm -f ${NAME} >/dev/null 2>&1 || true`, true);
-    await run(conn, `docker run -d --name ${NAME} -p ${PORT}:8080 -v ${DATA_VOL}:/app/server/data --restart unless-stopped ${oldImage}`, true);
+    await run(conn, `docker run -d --name ${NAME} -p ${PORT}:8080 -v ${DATA_VOL}:/app/server/data --restart unless-stopped ${oldImageId}`, true);
     conn.end(); process.exit(1);
   }
   console.log("[deploy] prod healthy, version:", prodHealth.out.trim());

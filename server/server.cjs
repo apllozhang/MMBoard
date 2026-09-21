@@ -13,8 +13,10 @@ const path = require("path");
 const { randomUUID } = require("crypto");
 const auth = require("./auth.cjs");
 const { renderMinutes } = require("./minutes-template.cjs");
-const { createTask, loadTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, QUEUE_CAPACITY,
+const { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY,
         DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
+const { hasKeys } = require("./iflytek.cjs");
+const { writeJsonAtomic, readJsonWithRecovery } = require("./persist.cjs");
 
 /** 每日转写免费额度基准(秒):讯飞 lfasr 普遍规则为每日约 2 小时,可在 data/settings.json
  *  加 "asrDailyQuotaSeconds": <秒> 覆盖;余量提示始终为本地估算,以讯飞控制台为准 */
@@ -44,8 +46,10 @@ const AUDIT_FILE = path.join(DATA, "audit.log");
 
 /** 操作审计:登录/改密/重跑/删除/设置变更落一行(时间/IP/用户/动作/明细/结果) */
 function audit(req, action, detail = "", ok = true) {
-  const user = req.authUser || "anon";
-  const line = `${new Date().toISOString()}\t${(req.headers["x-forwarded-for"] || req.ip || "-")}\t${user}\t${action}\t${String(detail).slice(0, 200)}\t${ok ? "ok" : "fail"}\n`;
+  // R03:清洗控制字符,防日志行伪造;仅用 socket 地址(未配置可信代理,不信任 X-Forwarded-For)
+  const clean = (v) => String(v).replace(/[\r\n\t\u0000-\u001f]/g, " ").slice(0, 200);
+  const user = clean(req.authUser || "anon");
+  const line = `${new Date().toISOString()}\t${clean(req.ip || "-")}\t${user}\t${clean(action)}\t${clean(detail)}\t${ok ? "ok" : "fail"}\n`;
   try { fs.appendFileSync(AUDIT_FILE, line); } catch { /* best effort */ }
 }
 
@@ -66,12 +70,16 @@ function rateLimit(key, max, windowMs) {
 
 /* ── 设置(模型管理,模仿 ZCode:多条目 + 激活其一 + 连通性测试) ── */
 function loadSettings() {
-  try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); }
-  catch { return { activeId: null, models: [] }; }
+  // R09:损坏时回退 .bak;两者皆坏抛错(绝不静默清空配置);ENOENT = 首次运行,返回空配置
+  try { return readJsonWithRecovery(SETTINGS_FILE); }
+  catch (e) {
+    if (e.code === "ENOENT") return { activeId: null, models: [] };
+    throw new Error(`设置数据不可读: ${e.message}`);
+  }
 }
 function saveSettings(s) {
   fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
+  writeJsonAtomic(SETTINGS_FILE, s);
 }
 function maskKey(k) {
   const s = String(k || "");
@@ -97,7 +105,16 @@ function loadSecret() {
   }
   /* 转写通道:settings.asr 存在即生效(provider: iflytek | local);讯飞参数 settings 优先 */
   if (st.asr && st.asr.provider) s.asr = { provider: st.asr.provider, localUrl: st.asr.localUrl || "" };
-  if (st.iflytek && st.iflytek.appId) s.iflytek = { appId: st.iflytek.appId, apiKey: st.iflytek.apiKey || "", apiSecret: st.iflytek.apiSecret || "" };
+  const ifly = st.iflytek && st.iflytek.appId ? st.iflytek : s.iflytek;
+  if (ifly && ifly.appId) {
+    s.iflytek = { appId: String(ifly.appId).trim(), apiKey: String(ifly.apiKey || "").trim(),
+                  apiSecret: String(ifly.apiSecret || ifly.secretKey || "").trim() };
+  }
+  // R06 复审:mock 仅在显式演示开关下允许(MMB_DEMO=1 或配置 demo:true)
+  if (process.env.MMB_DEMO === "1") {
+    s.iflytek = { ...(s.iflytek || {}), demo: true };
+    if (s.llm) s.llm.demo = true;
+  }
   return s;
 }
 
@@ -177,14 +194,20 @@ app.get("/api/version", (_req, res) => {
 
 /* ── R03 认证:除登录/状态外,全部 /api 需有效会话(注意 app.use 挂载下 req.path 为相对路径) ── */
 const AUTH_PUBLIC = new Set(["/auth/login", "/auth/status"]);
-app.use("/api", (req, res, next) => {
-  if (AUTH_PUBLIC.has(req.path)) return next();
+/** R03:status 与业务中间件共用同一解析(签名+有效期+撤销) */
+function resolveSession(req) {
   const a = auth.loadAuth(DATA);
   const token = auth.readSessionCookie(req);
   const sess = auth.verifyToken(a, token);
-  if (!sess || auth.isRevoked(token)) return res.status(401).json({ error: "未登录或会话已过期" });
+  if (!sess || auth.isRevoked(token)) return null;
+  return { username: sess.username, token };
+}
+app.use("/api", (req, res, next) => {
+  if (AUTH_PUBLIC.has(req.path)) return next();
+  const sess = resolveSession(req);
+  if (!sess) return res.status(401).json({ error: "未登录或会话已过期" });
   req.authUser = sess.username;
-  req.sessionToken = token;
+  req.sessionToken = sess.token;
   next();
 });
 /* ── R03 CSRF 防护:非 GET 请求必须携带 X-Requested-With 头(Cookie 为 SameSite=Strict 双保险) ── */
@@ -197,13 +220,20 @@ app.use("/api", (req, res, next) => {
 });
 
 /* ── 认证端点 ── */
-app.get("/api/auth/status", (_req, res) => {
-  const a = auth.loadAuth(DATA);
-  const sess = auth.verifyToken(a, auth.readSessionCookie(_req));
+app.get("/api/auth/status", (req, res) => {
+  let a;
+  try { a = auth.loadAuth(DATA); }
+  catch (e) { return res.status(500).json({ error: e.message }); }
+  const sess = resolveSession(req);
   res.json({ authenticated: !!sess, username: sess?.username || null, defaultPassword: !!a.defaultPassword });
 });
 
 app.post("/api/auth/login", (req, res) => {
+  // R03:登录限流(每 IP 每分钟 5 次)
+  if (!rateLimit(`login:${req.ip || "?"}`, 5, 60000)) {
+    audit(req, "login", "rate-limited", false);
+    return res.status(429).json({ error: "尝试过于频繁,请稍后再试" });
+  }
   const { username, password } = req.body || {};
   const a = auth.loadAuth(DATA);
   if (!auth.verifyPassword(a, username, password)) {
@@ -252,7 +282,7 @@ app.get("/api/meta", async (_req, res) => {
   const localAsrOnline = asrProvider === "local" ? await probeLocalAsr(st.asr?.localUrl) : false;
   res.json({
     ffmpeg: hasFfmpeg,
-    iflytekConfigured: !!secret.iflytek?.appId,
+    iflytekConfigured: hasKeys(secret.iflytek || {}),
     llmConfigured: !!secret.llm?.apiKey,
     asrProvider,
     localAsrOnline,
@@ -430,6 +460,11 @@ app.get("/api/tasks/:id", (req, res) => {
 
 app.post("/api/tasks", upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "缺少文件字段 file" });
+  // R08:队列满则拒绝(在写任何状态/文件引用前;本轮已落盘文件在下方清理)
+  if (queueDepth() >= QUEUE_CAPACITY) {
+    try { fs.rmSync(req.file.path); } catch { /* best effort */ }
+    return res.status(503).json({ error: `任务队列已满(${QUEUE_CAPACITY}),请等当前任务完成后再试` });
+  }
   // R18:上传限流(每 IP 每分钟 6 次);超限删除本次落盘文件
   if (!rateLimit(`upload:${req.ip || "?"}`, 6, 60000)) {
     try { fs.rmSync(req.file.path); } catch { /* best effort */ }
@@ -451,7 +486,7 @@ app.post("/api/tasks", upload.single("file"), (req, res) => {
   } catch (e) {
     try { fs.rmSync(req.file.path); } catch { /* best effort */ }
     const tasks = loadTasks();
-    fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks.filter((x) => x.id !== task.id), null, 2));
+    saveTasks(tasks.filter((x) => x.id !== task.id));
     return res.status(503).json({ error: e.message });
   }
   res.status(201).json(task);
@@ -483,7 +518,7 @@ app.get("/api/tasks/:id/rerun-preview", async (req, res) => {
     dailySeconds,
     freeSeconds,
     enough: freeSeconds >= audioSeconds,
-    mock: provider === "iflytek" && !loadSecret().iflytek?.appId,   // 讯飞通道且未配置 = 模拟转写
+    mock: provider === "iflytek" && !hasKeys(loadSecret().iflytek || {}),   // 讯飞通道且配置不完整 = 模拟转写
   });
 });
 
@@ -497,6 +532,10 @@ app.post("/api/tasks/:id/restart", (req, res) => {
   if (!t) return res.status(404).json({ error: "task not found" });
   if (RUNNING_STAGES.has(t.stage)) {
     return res.status(409).json({ error: "任务正在流水线上运行,请等完成后再重跑" });
+  }
+  // R08:队列满在改写任何状态之前拒绝(不产生永久卡 queued 的任务)
+  if (queueDepth() >= QUEUE_CAPACITY) {
+    return res.status(503).json({ error: `任务队列已满(${QUEUE_CAPACITY}),请稍后再试` });
   }
   const scope = req.body?.scope === "analyze" ? "analyze" : "all";
   audit(req, "task.restart", `${t.id} scope=${scope}`);
@@ -521,7 +560,7 @@ app.post("/api/tasks/:id/restart", (req, res) => {
   t.stage = "queued";
   t.error = "";
   t.runId = require("crypto").randomUUID();   // 新运行实例:旧执行写入会被 runId 校验拒绝
-  fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
+  saveTasks(tasks);
   // R08:重跑同样入队(串行,不与当前任务抢资源)
   try {
     enqueuePipeline(t, loadSecret(), transcript ? { transcript } : {});
@@ -583,6 +622,10 @@ app.get("/api/tasks/:id/speakers", (req, res) => {
 app.put("/api/tasks/:id/speakers", (req, res) => {
   const t = loadTasks().find((x) => x.id === req.params.id);
   if (!t) return res.status(404).json({ error: "task not found" });
+  // 4.3:运行中的任务禁止标注(避免与流水线竞争写 transcript/纪要)
+  if (RUNNING_STAGES.has(t.stage)) {
+    return res.status(409).json({ error: "任务正在流水线上运行,请等完成后再标注" });
+  }
   const map = {};
   for (const [k, v] of Object.entries(req.body?.map || {})) {
     if (/^\d+$/.test(String(k)) && typeof v === "string" && v.trim()) {
@@ -596,10 +639,10 @@ app.put("/api/tasks/:id/speakers", (req, res) => {
   catch { return res.status(500).json({ error: "转写文本读取失败" }); }
 
   tr.speakerMap = map;   // 原始文本与编号不动,map 可反复修改
-  fs.writeFileSync(tp, JSON.stringify(tr, null, 2));
+  writeJsonAtomic(tp, tr);
   const tasks = loadTasks();
   const t2 = tasks.find((x) => x.id === t.id);
-  if (t2) { t2.speakerMap = map; t2.updatedAt = new Date().toISOString(); fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2)); }
+  if (t2) { t2.speakerMap = map; t2.updatedAt = new Date().toISOString(); saveTasks(tasks); }
   audit(req, "task.speakers", `${t.id} ${JSON.stringify(map)}`);
 
   // 纯重渲染:有 analysis.json 才能只重渲染(否则提示先重跑分析)
@@ -650,7 +693,7 @@ app.delete("/api/tasks/:id", (req, res) => {
     return res.status(409).json({ error: "任务正在流水线上运行,请等完成(或失败)后再删除" });
   }
   tasks.splice(i, 1);
-  fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
+  saveTasks(tasks);
   const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best effort */ } };
   if (t.minutesFile) rm(path.join(OUTPUTS, t.minutesFile.split("/")[0]));
   else rm(path.join(OUTPUTS, t.id));   // 无纪要也清产物目录(transcript.json 等)
@@ -679,6 +722,13 @@ app.get(/^\/(?!api|outputs).*/, (_req, res) => res.sendFile(path.join(DIST, "ind
 
 /* R08:启动恢复——把上次运行中(失去执行者)的任务标记为中断 */
 recoverInterruptedTasks();
+
+/* R03:认证配置预检——损坏直接拒绝启动(fail-closed),绝不静默重建默认账号 */
+try { auth.loadAuth(DATA); }
+catch (e) {
+  console.error("[auth] FATAL:", e.message);
+  process.exit(1);
+}
 
 /* R18:multer/业务错误的统一转换(fileFilter 抛出的类型错误 → 400) */
 app.use((err, _req, res, _next) => {

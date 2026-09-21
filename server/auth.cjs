@@ -1,46 +1,62 @@
 /**
- * 认证与会话(R03)——内网单工具的最小可靠实现:
- *  · 账号存数据卷 auth.json(username + salt + scrypt hash + sessionSecret),文件不存在则初始化默认账号
- *  · 会话为无状态签名 token(HMAC-SHA256,含过期时间与用户名),放 HttpOnly Cookie;
- *    改密后轮换 sessionSecret 使全部旧会话失效
- *  · 生产部署后请立即登录修改默认密码
+ * 认证与会话(R03,复审整改):
+ *  · 账号存数据卷 auth.json;**首次初始化生成一次性随机密码,仅打印到启动日志一次**
+ *  · auth.json 损坏 → 抛错拒绝服务(fail-closed),绝不静默恢复公开默认密码
+ *  · 会话为无状态 HMAC token(含过期与用户名);改密轮换 sessionSecret 全端失效
+ *  · 登出 token 入内存黑名单
  */
 "use strict";
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
-const DEFAULT_USERNAME = "admin";
-const DEFAULT_PASSWORD = "mmboard2026";   // 首次启动生成,登录后请修改
-
+function authPath(DATA) { return path.join(DATA, "auth.json"); }
 function hashPassword(password, salt) {
   return crypto.scryptSync(String(password), salt, 32).toString("hex");
 }
 
-function authPath(DATA) { return path.join(DATA, "auth.json"); }
+function parseAuthFile(f) {
+  const a = JSON.parse(fs.readFileSync(f, "utf8"));
+  if (!a.username || !a.salt || !a.hash || !a.sessionSecret) {
+    throw new Error("auth.json 字段不完整");
+  }
+  return a;
+}
 
-/** 载入或初始化账号文件(数据卷内持久) */
+/** 载入账号;文件缺失 → 一次性随机密码初始化;损坏 → 抛错(fail-closed) */
 function loadAuth(DATA) {
   const f = authPath(DATA);
   if (fs.existsSync(f)) {
-    try { return JSON.parse(fs.readFileSync(f, "utf8")); }
-    catch (e) { console.error("[auth] auth.json 解析失败,重新初始化:", e.message); }
+    try { return parseAuthFile(f); }
+    catch (e) {
+      // fail-closed:配置损坏绝不重建默认账号;损坏文件保留供人工恢复
+      throw new Error(`认证配置损坏(${f}),服务拒绝启动。请从备份恢复或删除该文件后重新初始化: ${e.message}`);
+    }
   }
+  // R03 复审:支持环境注入(自动化测试/受控部署);未注入时用一次性随机密码(仅日志可见)
+  const password = process.env.MMB_ADMIN_PASSWORD || crypto.randomBytes(9).toString("base64url");
   const salt = crypto.randomBytes(16).toString("hex");
   const auth = {
-    username: DEFAULT_USERNAME,
+    username: "admin",
     salt,
-    hash: hashPassword(DEFAULT_PASSWORD, salt),
+    hash: hashPassword(password, salt),
     sessionSecret: crypto.randomBytes(32).toString("hex"),
     createdAt: new Date().toISOString(),
-    defaultPassword: true,          // 提醒未改密
+    defaultPassword: true,
   };
   fs.writeFileSync(f, JSON.stringify(auth, null, 2));
-  console.log(`[auth] 初始化账号 ${DEFAULT_USERNAME} / ${DEFAULT_PASSWORD}(登录后请立即修改密码)`);
+  console.log("=".repeat(64));
+  console.log(`[auth] 首次初始化账号: admin / ${password}`);
+  console.log(`[auth] 请立即登录并修改密码(此密码仅本次启动日志可见)`);
+  console.log("=".repeat(64));
   return auth;
 }
 
-function saveAuth(DATA, auth) { fs.writeFileSync(authPath(DATA), JSON.stringify(auth, null, 2)); }
+function saveAuth(DATA, auth) {
+  const tmp = authPath(DATA) + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(auth, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, authPath(DATA));
+}
 
 function verifyPassword(auth, username, password) {
   const u = String(username || "");
@@ -51,7 +67,7 @@ function verifyPassword(auth, username, password) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-/** 签名 token:`<exp>.<userB64>.<hmac(exp:user)>` */
+/** token:`<exp>.<userB64>.<hmac(exp:user)>` */
 function issueToken(auth, username, ttlMs = 7 * 24 * 3600 * 1000) {
   const exp = Date.now() + ttlMs;
   const user = Buffer.from(String(username), "utf8").toString("base64url");
@@ -59,10 +75,8 @@ function issueToken(auth, username, ttlMs = 7 * 24 * 3600 * 1000) {
   return `${exp}.${user}.${sig}`;
 }
 
-/** 校验通过返回 { username },否则 null */
 function verifyToken(auth, token) {
-  const s = String(token || "");
-  const parts = s.split(".");
+  const parts = String(token || "").split(".");
   if (parts.length !== 3) return null;
   const [exp, user, sig] = parts;
   if (!/^\d+$/.test(exp) || !user) return null;
@@ -75,14 +89,13 @@ function verifyToken(auth, token) {
   catch { return null; }
 }
 
-/** 已登出 token 黑名单(内存;服务重启后清空——无状态会话的务实折中) */
+/** 已登出 token 黑名单(内存;进程重启清空,token 自然到期) */
 const revoked = new Set();
-function revokeToken(token) { if (token) revoked.add(String(token)); }
-function isRevoked(token) { return revoked.has(String(token)); }
+const revokeToken = (t) => { if (t) revoked.add(String(t)); };
+const isRevoked = (t) => revoked.has(String(t));
 
 function readSessionCookie(req) {
-  const raw = req.headers.cookie || "";
-  for (const pair of raw.split(";")) {
+  for (const pair of String(req.headers.cookie || "").split(";")) {
     const [k, ...v] = pair.trim().split("=");
     if (k === "mt_session") return v.join("=");
   }

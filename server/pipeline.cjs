@@ -10,6 +10,7 @@ const { randomUUID } = require("crypto");
 const { execFile, execFileSync } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
+const { writeJsonAtomic, readJsonWithRecovery } = require("./persist.cjs");
 const { transcribe } = require("./iflytek.cjs");
 const localAsr = require("./local.cjs");
 const { analyze } = require("./llm.cjs");
@@ -32,27 +33,8 @@ const hasFfmpeg = (() => {
   catch { return false; }
 })();
 
-/** R09 原子写 JSON:临时文件 + 同盘 rename;写入前保留一份 .bak */
-function writeJsonAtomic(file, obj) {
-  const tmp = file + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
-  try { if (fs.existsSync(file)) fs.copyFileSync(file, file + ".bak"); } catch { /* best effort */ }
-  fs.renameSync(tmp, file);
-}
-
-function loadTasks() {
-  try { return JSON.parse(fs.readFileSync(TASKS_FILE, "utf8")); }
-  catch (e) {
-    // R09:主文件损坏时回退 .bak,两者皆坏才报错(明确区分损坏与不存在)
-    try {
-      const bak = JSON.parse(fs.readFileSync(TASKS_FILE + ".bak", "utf8"));
-      console.error("[pipeline] tasks.json 损坏,已从 .bak 恢复:", e.message);
-      return bak;
-    } catch {
-      throw new Error(`任务数据不可读(tasks.json 与备份均无法解析): ${e.message}`);
-    }
-  }
-}
+function loadTasks() { return readJsonWithRecovery(TASKS_FILE); }
+function saveTasks(tasks) { writeJsonAtomic(TASKS_FILE, tasks); }function loadTasks() { return readJsonWithRecovery(TASKS_FILE); }
 function saveTasks(tasks) { writeJsonAtomic(TASKS_FILE, tasks); }
 
 function newStep(key, label) { return { key, label, status: "pending", startedAt: null, finishedAt: null, note: "" }; }
@@ -69,8 +51,8 @@ function updateTask(taskId, runId, patch) {
 /** 当日转写用量记账:真实转写成功后按音频时长累加(秒)。mock 不记。 */
 function recordQuota(seconds) {
   const day = new Date().toISOString().slice(0, 10);
-  let q = {};
-  try { q = JSON.parse(fs.readFileSync(QUOTA_FILE, "utf8")); } catch { /* 首日记账 */ }
+  let q;
+  try { q = readJsonWithRecovery(QUOTA_FILE); } catch { q = {}; }   // 损坏回退 .bak,皆坏按首日
   q[day] = Math.round(((q[day] || 0) + seconds) * 10) / 10;
   writeJsonAtomic(QUOTA_FILE, q);
   return q[day];
@@ -118,6 +100,8 @@ function enqueuePipeline(task, secret, opts = {}) {
   taskQueue.push({ task, secret, opts });
   drainQueue();
 }
+
+const queueDepth = () => taskQueue.length;
 
 function drainQueue() {
   if (queueDraining) return;
@@ -346,7 +330,9 @@ async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers
       analysis,
       meta: { date: task.createdAt.slice(0, 10), fileName: task.originalFileName || task.fileName,
               transcriptChars: text.length, talkStats,
-              transcriptionMode, analysisMode: analysis.mock ? "mock" : "real" },
+              transcriptionMode, analysisMode: analysis.mock ? "mock" : "real",
+              uploadedAt: task.createdAt, generatedAt: new Date().toISOString(),
+              meetingOccurredAt: null },
     });
     fs.writeFileSync(path.join(outDir, fileName), html, "utf8");
     // 说话人标注纯重渲染的依据:分析结果 + 发言统计 + 渲染元信息落盘
@@ -354,7 +340,8 @@ async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers
       analysis,
       talkStats,
       meta: { date: task.createdAt.slice(0, 10), fileName: task.originalFileName || task.fileName,
-              transcriptChars: text.length, transcriptionMode, analysisMode: analysis.mock ? "mock" : "real" },
+              transcriptChars: text.length, transcriptionMode, analysisMode: analysis.mock ? "mock" : "real",
+              uploadedAt: task.createdAt },
     }, null, 2));
     setStep(task.id, task.runId, "render", "done", fileName);
     updateTask(task.id, task.runId, { stage: "done", title: analysis.title || task.title, minutesFile: `${task.id}/${fileName}` });
@@ -384,4 +371,4 @@ function failTask(task, e) {
   saveTasks(tasks);
 }
 
-module.exports = { createTask, loadTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, QUEUE_CAPACITY, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT };
+module.exports = { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT };

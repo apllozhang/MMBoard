@@ -27,8 +27,11 @@ function noticeBannerHtml(meta, a) {
   const tags = [];
   if (meta.transcriptionMode === "mock") tags.push("转写为演示模拟数据");
   if (meta.analysisMode === "mock") tags.push("AI 分析为演示模拟数据");
-  if (a && a.samplingTruncated) tags.push("分析基于转写采样(非全文,中段未覆盖)");
-  if (a && a.partial) tags.push("AI 输出被截断,本纪要为部分结果");
+  if (a && a.samplingTruncated) tags.push("分析基于转写采样(非全文,部分中段未覆盖)");
+  if (a && a.partial) tags.push("AI 输出被截断或字段缺失,本纪要为部分结果");
+  if (a && Array.isArray(a.missingFields) && a.missingFields.length) {
+    tags.push(`分析未生成章节:${a.missingFields.map(esc).join("、")}`);
+  }
   if (!tags.length) return "";
   const label = tags.some((x) => x.includes("演示")) ? "演示数据" : "内容完整性提示";
   return `<div class="mock-banner" role="note">⚠ ${esc(label)}:${tags.map(esc).join(";")}</div>`;
@@ -164,12 +167,17 @@ ${talk.map((x) => `                <tr><td>${esc(x.speaker)}</td><td class="num"
         </div>
       </section>` : "";
 
-  const actionRows = (a.actions || []).map((x) => `
+  const actionRows = (a.actions || []).map((x) => {
+    const src = x.quote
+      ? `依据原文:「${esc(x.quote)}」${x.tref ? `(${esc(x.tref)})` : ""}`
+      : `<span class="tref-warn">模型推断,未附原文${x.tref ? `(时间 ${esc(x.tref)})` : ""}</span>`;
+    return `
           <tr>
             <td>${esc(x.owner || "—")}</td>
-            <td>${esc(x.item)}${x.quote ? `<span class="quote-src">依据原文:「${esc(x.quote)}」</span>` : ""}</td>
+            <td>${esc(x.item)}<span class="quote-src">${src}</span></td>
             <td>${esc(x.due || "—")}</td>
-          </tr>`).join("\n");
+          </tr>`;
+  }).join("\n");
 
   const risks = (a.risks || []).length
     ? `
@@ -324,6 +332,7 @@ footer .tm{margin:0 0 4px}
   .hero h1{font-size:26px}
 }
   .quote-src{display:block;margin-top:3px;font-size:12px;color:var(--color-text-muted)}
+  .tref-warn{color:var(--status-warning-text)}
   .mock-banner{background:var(--status-warning-bg);color:var(--status-warning-text);font-weight:600;
     padding:10px 16px;text-align:center;font-size:13.5px;border-bottom:1px solid var(--color-border)}
   @media (max-width:560px){.mock-banner{font-size:12.5px;padding:9px 10px}}
@@ -362,7 +371,9 @@ ${mockBanner}
     <h1>${esc(a.title || "会议纪要")}</h1>
     <p>${esc(a.summary || "")}</p>
     <div class="meta">
-      <span>生成日期:${esc(meta.date)}</span>
+      <span>上传时间:${esc(meta.uploadedAt || meta.date)}</span>
+        <span>纪要生成:${esc(meta.generatedAt || meta.date)}</span>
+        <span>会议日期:未提供</span>
       <span>来源:${esc(meta.fileName)}</span>
       <span>转写:${esc(String(meta.transcriptChars))} 字</span>
     </div>
@@ -436,7 +447,7 @@ ${review}
 ${talkChart ? `<script>${hasChart ? echartsSrc : ""}</` + `script>
 ${hasChart ? `<script>
 (function(){
-  var TALK = ${JSON.stringify(talk).replace(/</g, "\\u003c")};
+  var TALK = ${JSON.stringify(talk.map((x) => ({ ...x, speakerHtml: esc(x.speaker) }))).replace(/</g, "\\u003c")};
   var el = document.getElementById("talk-chart");
   if (!window.echarts || !el || !TALK.length) return;
   function dark(){ return document.documentElement.classList.contains("dark"); }
@@ -456,7 +467,7 @@ ${hasChart ? `<script>
                axisLine: { lineStyle: { color: d ? "#3d3849" : "#d9d9d6" } } },
       tooltip: { trigger: "axis", formatter: function(ps){
         var p = ps[0]; var x = TALK[TALK.length - 1 - p.dataIndex];
-        return x.speaker + ": " + (x.ms / 60000).toFixed(1) + " 分钟(" + x.pct + "%)";
+        return x.speakerHtml + ": " + (x.ms / 60000).toFixed(1) + " 分钟(" + x.pct + "%)";
       } },
       series: [{ type: "bar", barMaxWidth: 26,
         data: TALK.map(function(x){ return x.ms / 60000; }).reverse(),
