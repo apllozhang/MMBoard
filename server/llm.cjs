@@ -9,9 +9,51 @@
 "use strict";
 const https = require("https");
 const http = require("http");
+const net = require("net");
+const dns = require("dns").promises;
+
+/* ── R05:LLM 地址白名单——协议/解析目的校验,默认拒绝私网与保留地址 ──
+ * 内网部署的本地模型(vLLM/Ollama)需在 settings.json 显式 "allowPrivateLlmHosts": true;
+ * 云元数据地址(169.254.169.254)无条件拒绝。原生 https.request 不跟随重定向,无跳转绕过。 */
+function isPrivateIp(ip) {
+  const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+  if (net.isIPv4(v4)) {
+    const [a, b] = v4.split(".").map(Number);
+    if (a === 127 || a === 10 || a === 0) return true;                 // 环回/私网/保留
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;                           // 链路本地/云元数据
+    return false;
+  }
+  if (net.isIPv6(ip)) return ip === "::1" || ip === "::" || /^(f[cd]|fe[89ab])/i.test(ip);
+  return false;
+}
+
+async function assertLlmUrl(urlStr, { allowPrivate = false } = {}) {
+  let u;
+  try { u = new URL(String(urlStr)); } catch { throw new Error("LLM 地址格式无效"); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("LLM 地址仅允许 http/https 协议");
+  if (/metadata/i.test(u.hostname)) throw new Error("LLM 地址指向云元数据端点,无条件拒绝");
+  let addrs;
+  if (net.isIP(u.hostname)) addrs = [u.hostname];
+  else {
+    try { addrs = (await dns.lookup(u.hostname, { all: true })).map((x) => x.address); }
+    catch (e) { throw new Error(`LLM 地址无法解析(${u.hostname}): ${e.message}`); }
+  }
+  if (addrs.some((ip) => ip === "169.254.169.254")) {
+    throw new Error("LLM 地址指向云元数据端点,无条件拒绝");
+  }
+  if (!allowPrivate && addrs.some(isPrivateIp)) {
+    throw new Error("LLM 地址解析到内网/保留地址,已拒绝;如确需内网模型服务,请在 settings.json 配置 allowPrivateLlmHosts: true");
+  }
+  return true;
+}
 
 /** POST JSON,空闲超时默认 20 分钟,返回 {status, text} */
 function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000) {
+  // R17:空闲超时 + 总截止(25min)+ 响应体上限(10MB)
+  const DEADLINE_MS = 25 * 60 * 1000;
+  const MAX_BODY = 10 * 1024 * 1024;
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     const mod = u.protocol === "http:" ? http : https;
@@ -22,11 +64,18 @@ function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000) {
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
-      res.on("data", (c) => chunks.push(c));
+      let size = 0;
+      res.on("data", (c) => {
+        size += c.length;
+        if (size > MAX_BODY) req.destroy(new Error(`LLM 响应超过 ${MAX_BODY / 1048576}MB 上限`));
+        chunks.push(c);
+      });
       res.on("end", () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString("utf8") }));
     });
     req.on("timeout", () => req.destroy(new Error(`LLM 请求空闲超时(${Math.round(timeoutMs / 60000)} 分钟无数据)`)));
-    req.on("error", reject);
+    const deadline = setTimeout(() => req.destroy(new Error(`LLM 请求总耗时超过 ${Math.round(DEADLINE_MS / 60000)} 分钟`)), DEADLINE_MS);
+    req.on("error", (e) => { clearTimeout(deadline); reject(e); });
+    req.on("close", () => clearTimeout(deadline));
     req.end(body);
   });
 }
@@ -47,20 +96,20 @@ async function analyze(transcript, cfg, log = console.log) {
       return await analyzeOnce(transcript, cfg, provider, log, attempt);
     } catch (e) {
       lastErr = e;
-      if (attempt === 1) {
-        log(`[llm] 第 1 次调用失败(${String(e.message).slice(0, 80)}),3s 后自动重试`);
-        await new Promise((r) => setTimeout(r, 3000));
-      }
+      if (e.noRetry || attempt === 2) throw e;   // R17:确定性错误与末次直接抛
+      log(`[llm] 第 1 次调用失败(${String(e.message).slice(0, 80)}),3s 后自动重试`);
+      await new Promise((r) => setTimeout(r, 3000));
     }
   }
   throw lastErr;
 }
 
 async function analyzeOnce(transcript, cfg, provider, log = console.log) {
+  await assertLlmUrl(cfg.baseUrl, { allowPrivate: !!cfg.allowPrivate });   // R05:发请求前校验地址
   samplingTruncatedFlag.value = false;
-  const prompt = buildPrompt(transcript);
+  const { prompt, truncated: samplingTruncated, coverage } = buildPrompt(transcript);
   const system = "你是专业的会议纪要分析师。只输出 JSON,不要输出任何其他文字。";
-  console.log(`[llm] 模型=${cfg.model} 转写 ${transcript.length} 字 → 提示 ${prompt.length} 字`);
+  console.log(`[llm] 模型=${cfg.model} 转写 ${transcript.length} 字 → 提示 ${prompt.length} 字${samplingTruncated ? `(采样覆盖率约 ${coverage}%)` : ""}`);
 
   let res, j;
   if (provider === "anthropic") {
@@ -74,7 +123,11 @@ async function analyzeOnce(transcript, cfg, provider, log = console.log) {
       system,
       messages: [{ role: "user", content: prompt }],
     });
-    if (res.status < 200 || res.status >= 300) throw new Error(`LLM API HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+    if (res.status < 200 || res.status >= 300) {
+      const err = new Error(`LLM API HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+      if (res.status >= 400 && res.status < 500) err.noRetry = true;   // R17:确定性错误不重试
+      throw err;
+    }
     j = JSON.parse(res.text);
     const content = (j.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("");
     const stopReason = j.stop_reason ?? "-";
@@ -88,7 +141,7 @@ async function analyzeOnce(transcript, cfg, provider, log = console.log) {
     const { obj, partial } = extractJson(content);
     return { ...normalizeAnalysis(obj), mock: false,
              partial: partial || (stopReason !== "end_turn" && stopReason !== "-"),
-             samplingTruncated: samplingTruncatedFlag.value };
+             samplingTruncated, samplingCoverage: coverage };
   }
 
   // OpenAI 兼容协议
@@ -103,7 +156,11 @@ async function analyzeOnce(transcript, cfg, provider, log = console.log) {
     ],
     temperature: 0.3,
   });
-  if (res.status < 200 || res.status >= 300) throw new Error(`LLM API HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+  if (res.status < 200 || res.status >= 300) {
+    const err = new Error(`LLM API HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+    if (res.status >= 400 && res.status < 500) err.noRetry = true;
+    throw err;
+  }
   j = JSON.parse(res.text);
   const content = j.choices?.[0]?.message?.content ?? "";
   const stopReason = j.choices?.[0]?.finish_reason ?? "-";
@@ -114,7 +171,7 @@ async function analyzeOnce(transcript, cfg, provider, log = console.log) {
   const { obj, partial } = extractJson(content);
   return { ...normalizeAnalysis(obj), mock: false,
            partial: partial || (stopReason !== "stop" && stopReason !== "-"),
-           samplingTruncated: samplingTruncatedFlag.value };
+           samplingTruncated, samplingCoverage: coverage };
 }
 
 /** R14:LLM 输出结构规范化——类型不符纠正、缺失补空,模板渲染永不因字段异常崩溃 */
@@ -123,13 +180,17 @@ function normalizeAnalysis(a) {
   const str = (v) => (typeof v === "string" ? v : (v == null ? "" : String(v)));
   const strArr = (v) => (Array.isArray(v) ? v.map(str).filter((x) => x.trim()) : []);
   if (!a || typeof a !== "object" || Array.isArray(a)) a = {};
+  // R14 复审:区分"明确返回空"与"字段缺失/类型错误"(缺失者标 partial,模板不得显示为"无")
+  const REQUIRED = ["title", "summary", "topics", "decisions", "actions"];
+  const missingFields = REQUIRED.filter((k) => !(k in a) || a[k] == null);
   return {
-    title: str(a.title),
+    missingFields,
     summary: str(a.summary),
     topics: arr(a.topics).map((t) => ({ heading: str(t.heading), person: str(t.person), detail: str(t.detail) })),
     decisions: strArr(a.decisions),
     actions: arr(a.actions).map((x) => ({ owner: str(x.owner), item: str(x.item), due: str(x.due),
-                                          quote: typeof x.quote === "string" ? x.quote : "" })),
+                                          quote: typeof x.quote === "string" ? x.quote : "",
+                                          tref: typeof x.tref === "string" ? x.tref : "" })),
     risks: strArr(a.risks),
     highlights: strArr(a.highlights),
     strengths: arr(a.strengths).map((x) => ({
@@ -148,7 +209,8 @@ function normalizeAnalysis(a) {
     })),
     consensus: arr(a.consensus).map((c) => ({ person: str(c.person), viewpoint: str(c.viewpoint), basis: str(c.basis) })),
     doubts: arr(a.doubts).map((d) => ({ person: str(d.person), claim: str(d.claim), issue: str(d.issue), basis: str(d.basis), kw: str(d.kw) })),
-    partial: !!a.partial,
+    partial: !!a.partial || missingFields.length > 0,
+    missingFields,
     samplingTruncated: !!a.samplingTruncated,
   };
 }
@@ -159,29 +221,47 @@ const samplingTruncatedFlag = { value: false };
 function buildPrompt(transcript) {
   // 长会采样:全量 ≤ LIMIT 直接用;超限保留【开头(议程/背景)+结尾(决议/行动项)】,中段按整行略去。
   // R13:换行搜索限距 2000(稀疏换行/单行长文本不再撑爆预算);组装后仍有硬预算兜底。
-  const LIMIT = 42000, HEAD = 34000, TAIL = 6000, LOOKAHEAD = 2000;
+  const LIMIT = 42000, HEAD = 34000, TAIL = 6000, LOOKAHEAD = 2000, MIDDLE_KEEP = 12000;
   let input = transcript;
   let truncated = false;
+  let coverage = 100;
   if (transcript.length > LIMIT) {
     truncated = true;
-    const headCut = (n) => { const k = transcript.indexOf("\n", n); return (k > 0 && k <= n + LOOKAHEAD) ? transcript.slice(0, k) : transcript.slice(0, n); };
-    const tailCut = (n) => { const k = transcript.lastIndexOf("\n", transcript.length - n); return (k > 0 && k >= transcript.length - n - LOOKAHEAD) ? transcript.slice(k + 1) : transcript.slice(transcript.length - n); };
-    input = headCut(HEAD) + "\n[……中段讨论内容较长,此处省略……]\n" + tailCut(TAIL);
+    const nlAfter = (n) => { const k = transcript.indexOf("\n", n); return (k > 0 && k <= n + LOOKAHEAD) ? k : n; };
+    const nlBefore = (n) => { const k = transcript.lastIndexOf("\n", transcript.length - n); return (k > 0 && k >= transcript.length - n - LOOKAHEAD) ? k + 1 : transcript.length - n; };
+    const hEnd = nlAfter(HEAD), tStart = nlBefore(TAIL);
+    const head = transcript.slice(0, hEnd);
+    const tail = transcript.slice(tStart);
+    const middle = transcript.slice(hEnd, tStart);
+    // R13 复审:中段按行均匀采样保留 MIDDLE_KEEP 字符(不再整体丢弃),覆盖率随采样标注
+    let midKept = middle;
+    if (middle.length > MIDDLE_KEEP) {
+      const rows = middle.split("\n");
+      const avg = middle.length / Math.max(1, rows.length);
+      const K = Math.max(2, Math.floor(MIDDLE_KEEP / Math.max(1, avg)));
+      const step = rows.length / K;
+      const picked = [];
+      for (let i = 0; i < rows.length; i += step) picked.push(rows[Math.floor(i)]);
+      midKept = picked.join("\n");
+    }
+    coverage = Math.round(((head.length + tail.length + midKept.length) / transcript.length) * 100);
+    input = head + `\n[……中段已按时间均匀采样,覆盖率约 ${coverage}%……]\n` + midKept + "\n" + tail;
     if (input.length > LIMIT) input = input.slice(0, HEAD) + "\n[……中段省略……]\n" + input.slice(-TAIL);   // 硬预算兜底
     samplingTruncatedFlag.value = true;
   }
-  return `请把以下会议转写整理成深度结构化纪要,严格只输出一个 JSON(不要任何其他文字)。
+  const prompt = `请把以下会议转写整理成深度结构化纪要,严格只输出一个 JSON(不要任何其他文字)。
 转写为逐句文本,每行格式:「[MM:SS] 说话人N: 内容」(N 是讯飞角色分离的编号,不一定对应真实姓名)。
 结构分两大部分:「记录」(必有)与「点评」(内容支撑得起才输出,支撑不起则对应字段给空数组)。
-所有分析必须引用转写里的真实细节(可用「」引用原话),禁止编造。person 字段优先用转写中出现的真实姓名
-(能从上下文判断说话人N是谁时),否则保留「说话人N」。字段全部保留:
+所有分析必须引用转写里的真实细节(可用「」引用原话),禁止编造。
+person 字段一律原样填写「说话人N」(N 为该行标注的说话人编号),禁止自行推测或还原真实姓名——
+真实姓名由系统在展示阶段按人工标注映射。字段全部保留:
 
 {
   "title": "会议标题(≤20字)",
   "summary": "整体摘要,2-4 句,概括议程与结论",
   "topics": [{ "heading": "议题/板块名", "person": "主讲人,无则空串", "detail": "讨论要点,2-3 句" }],
   "decisions": ["达成的决议,每条一句"],
-  "actions": [{ "owner": "负责人", "item": "待办事项", "due": "时间节点,无则空串", "quote": "支撑该行动项的原始发言片段(可选,禁止编造)" }],
+  "actions": [{ "owner": "负责人", "item": "待办事项", "due": "时间节点,无则空串", "tref": "来源时间范围如 05:12-07:40(取自行首时间戳,可选)", "quote": "支撑该行动项的原始发言片段(可选,禁止编造)" }],
   "risks": ["风险与待确认事项"],
   "highlights": ["亮点点评,每条一句,引用具体细节"],
   "strengths": [{ "person": "讲者/部门名", "items": [{ "title": "维度名(如 能力拆分/实用价值/高光环节)", "detail": "具体分析,2-3句" }] }],
@@ -192,9 +272,10 @@ function buildPrompt(transcript) {
   "doubts": [{ "person": "讲者", "claim": "存疑观点(引用原话)", "issue": "存疑/不合理之处,客观对事不对人", "basis": "查证方向(如 IEEE 802.1Q、厂商官方文档名、知名行业报告),无把握写空串", "kw": "检索关键词 2-4 个" }]
 }
 「求同存疑」纪律(最高优先):① consensus 只列确有行业现状/主流实践/公开标准支撑的观点,严禁客套式表扬;② doubts 只在存在具体理由(与主流实践/公开标准/已知事实相悖,或逻辑跳跃、证据不足)时列出,必须点名到人并引用原话,绝不硬凑;③ **绝不生成任何 URL/链接**——查证方向只写来源名称,检索关键词会由系统渲染为搜索入口,由人工核实;④ 若所有观点确凿无疑,doubts 诚实地给空数组。
-${truncated ? "注意:转写较长,中段已省略,请基于保留内容分析,不要臆测被省略部分。\n" : ""}
+${truncated ? `注意:转写较长,已按时间均匀采样(覆盖率约 ${coverage}%),请基于保留内容分析,不要臆测未覆盖部分,并在可能处标注来源时间范围。\n` : ""}
 会议转写:
 ${input}`;
+  return { prompt, truncated, coverage };
 }
 
 /** 截断 JSON 修复:扫描字符串/转义状态,截到最后一个完整顶层成员,按该时刻的栈闭合剩余结构 */
@@ -275,4 +356,4 @@ function mockAnalysis(transcript) {
   };
 }
 
-module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson };   // 后三者导出供回归测试
+module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson, assertLlmUrl, isPrivateIp };   // 后四者导出供回归测试

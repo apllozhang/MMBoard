@@ -17,14 +17,34 @@ const CHUNK = 10 * 1024 * 1024;          // 官方建议分片 10MB
 const POLL_INTERVAL = 5000;
 const POLL_TIMEOUT = 30 * 60 * 1000;
 
-function hasKeys(cfg) {
-  return !!(cfg && cfg.appId && cfg.secretKey && !String(cfg.appId).startsWith("在此"));
+/** 4.1 配置 schema 统一:settings/密钥文件统一为 appId+apiKey+apiSecret;
+ *  旧字段 secretKey 作为 apiSecret 的别名兼容。返回规范化配置。 */
+function normalizeCfg(cfg) {
+  if (!cfg || typeof cfg !== "object") return { appId: "", apiKey: "", apiSecret: "" };
+  const trimReal = (v) => {
+    const s = String(v || "").trim();
+    return s.startsWith("在此") ? "" : s;   // example 占位符不算已配置
+  };
+  return {
+    appId: trimReal(cfg.appId),
+    apiKey: trimReal(cfg.apiKey),
+    apiSecret: trimReal(cfg.apiSecret || cfg.secretKey),
+    language: cfg.language,
+    roleType: cfg.roleType,
+    demo: !!cfg.demo,
+  };
 }
 
-function makeSigna(appId, secretKey) {
+function hasKeys(cfg) {
+  const c = normalizeCfg(cfg);
+  // 录音文件转写(lfasr)真实签名仅需 appId+apiSecret(secretKey);apiKey 为其他讯飞服务的可选项
+  return !!(c.appId && c.apiSecret);
+}
+
+function makeSigna(appId, apiSecret) {
   const ts = String(Math.floor(Date.now() / 1000));
   const md5 = crypto.createHash("md5").update(appId + ts).digest("hex");
-  const signa = crypto.createHmac("sha1", secretKey).update(md5).digest("base64");
+  const signa = crypto.createHmac("sha1", apiSecret).update(md5).digest("base64");
   return { ts, signa };
 }
 
@@ -85,11 +105,16 @@ function sliceId(n) {
 
 /** 转写入口。返回 { text, mock } —— text 为按句换行的纯文本 */
 async function transcribe(audioPath, cfg, log = console.log) {
-  if (!hasKeys(cfg)) {
-    log("[iflytek] 未配置密钥 → mock 转写");
+  const nc = normalizeCfg(cfg);
+  if (!hasKeys(nc)) {
+    // R06 复审:生产缺配置必须显式失败;mock 仅在显式 demo 开关(MMB_DEMO=1 或配置 demo:true)下允许
+    if (!nc.demo) {
+      throw new Error("讯飞转写未配置(appId/apiKey/apiSecret 不完整),且未开启演示模式(MMB_DEMO=1)——拒绝静默生成模拟内容");
+    }
+    log("[iflytek] 演示模式 → mock 转写");
     return { text: mockTranscript(audioPath), mock: true };
   }
-  const appId = cfg.appId, secretKey = cfg.secretKey;
+  const appId = nc.appId, secretKey = nc.apiSecret;
   const file = fs.readFileSync(audioPath);
   const sliceNum = Math.ceil(file.length / CHUNK);
 
@@ -181,4 +206,4 @@ function mockTranscript(audioPath) {
   ].map((s, i) => `${name} [00:${String(i * 45).padStart(2, "0")}] ${s}`).join("\n");
 }
 
-module.exports = { transcribe, hasKeys };
+module.exports = { transcribe, hasKeys, normalizeCfg };
