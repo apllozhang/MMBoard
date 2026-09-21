@@ -9,7 +9,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 WORKDIR /app/server
 COPY server/node_modules ./node_modules
 COPY server/package.json ./
-COPY server/iflytek.cjs server/llm.cjs server/minutes-template.cjs server/pipeline.cjs server/local.cjs server/auth.cjs server/server.cjs ./
+COPY server/iflytek.cjs server/llm.cjs server/minutes-template.cjs server/pipeline.cjs server/local.cjs server/auth.cjs server/persist.cjs server/server.cjs ./
 COPY dist ../dist
 COPY public/assets ../public/assets
 COPY vendor ../vendor

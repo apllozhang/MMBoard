@@ -71,7 +71,7 @@ function pack() {
     process.exit(1);
   }
   // R10 清单:server 代码(含 local/auth)、vendor、Dockerfile;不含 meeting.secret.json(R12,密钥在数据卷)
-  execSync(`"${TAR}" -czf "${TARGZ}" -C "${PROJ}" dist public/assets vendor vendor/echarts.min.js server/package.json server/iflytek.cjs server/llm.cjs server/minutes-template.cjs server/pipeline.cjs server/local.cjs server/auth.cjs server/server.cjs server/node_modules deploy/Dockerfile`, { stdio: "inherit" });
+  execSync(`"${TAR}" -czf "${TARGZ}" -C "${PROJ}" dist public/assets vendor vendor/echarts.min.js server/package.json server/iflytek.cjs server/llm.cjs server/minutes-template.cjs server/pipeline.cjs server/local.cjs server/auth.cjs server/persist.cjs server/server.cjs server/node_modules deploy/Dockerfile`, { stdio: "inherit" });
   console.log("packed:", fs.statSync(TARGZ).size, "bytes");
 }
 
