@@ -31,7 +31,9 @@ function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000) {
   });
 }
 
-/** 分析转写文本 → 结构化纪要数据(双协议:anthropic Messages / openai chat.completions) */
+/** 分析转写文本 → 结构化纪要数据(双协议:anthropic Messages / openai chat.completions)
+ *  R17+:瞬态失败(空正文/超时/解析失败)自动重试一次——GLM-5.3-Flash 偶发把预算全部
+ *  花在思考上(响应 0 字 stop=max_tokens),同输入重试即可成功 */
 async function analyze(transcript, cfg, log = console.log) {
   const provider = cfg?.provider === "anthropic" ? "anthropic" : "openai";
   const usable = cfg && cfg.baseUrl && cfg.apiKey && cfg.model && !cfg.apiKey.startsWith("在此");
@@ -39,6 +41,22 @@ async function analyze(transcript, cfg, log = console.log) {
     log("[llm] 未配置 → mock 分析");
     return { ...mockAnalysis(transcript), mock: true };
   }
+  let lastErr;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await analyzeOnce(transcript, cfg, provider, log, attempt);
+    } catch (e) {
+      lastErr = e;
+      if (attempt === 1) {
+        log(`[llm] 第 1 次调用失败(${String(e.message).slice(0, 80)}),3s 后自动重试`);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+async function analyzeOnce(transcript, cfg, provider, log = console.log) {
   samplingTruncatedFlag.value = false;
   const prompt = buildPrompt(transcript);
   const system = "你是专业的会议纪要分析师。只输出 JSON,不要输出任何其他文字。";
@@ -60,7 +78,12 @@ async function analyze(transcript, cfg, log = console.log) {
     j = JSON.parse(res.text);
     const content = (j.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("");
     const stopReason = j.stop_reason ?? "-";
-    console.log(`[llm] 响应 ${content.length} 字 stop=${stopReason}`);
+    const thought = (j.content ?? []).some((b) => b.type === "thinking");
+    console.log(`[llm] 响应 ${content.length} 字 stop=${stopReason}${thought ? " (含思考块)" : ""}`);
+    if (!content.trim()) {
+      // R17:思考预算耗尽时 GLM 可能正文为空——必须显式失败(触发重试),不能当空串解析
+      throw new Error(`GLM 返回空正文(stop=${stopReason}${thought ? ",仅思考块" : ""})——思考预算耗尽或服务异常`);
+    }
     // R14:输出结构规范化 + 截断/采样标记(部分结果不得冒充完整纪要)
     const { obj, partial } = extractJson(content);
     return { ...normalizeAnalysis(obj), mock: false,
@@ -85,6 +108,9 @@ async function analyze(transcript, cfg, log = console.log) {
   const content = j.choices?.[0]?.message?.content ?? "";
   const stopReason = j.choices?.[0]?.finish_reason ?? "-";
   console.log(`[llm] 响应 ${content.length} 字 stop=${stopReason}`);
+  if (!content.trim()) {
+    throw new Error(`GLM 返回空正文(stop=${stopReason})——思考预算耗尽或服务异常`);
+  }
   const { obj, partial } = extractJson(content);
   return { ...normalizeAnalysis(obj), mock: false,
            partial: partial || (stopReason !== "stop" && stopReason !== "-"),
