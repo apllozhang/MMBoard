@@ -105,6 +105,12 @@ function startLlmStub() {
         } else if (state.chunkBadJsonIdx != null && new RegExp(`第 ${state.chunkBadJsonIdx}/`).test(body)) {
           content = "这不是JSON输出{{";       // 注入:残缺 JSON → 该块如实标注缺失
         } else {
+          // F01 红测试:瞬态 503 注入(once=仅首次,all=全部)——验证 map 复用瞬态重试策略
+          state.mapReqCount = (state.mapReqCount || 0) + 1;
+          if (state.map503All || (state.map503Once && state.mapReqCount === 1)) {
+            res.writeHead(503, { "Content-Type": "application/json" });
+            return res.end('{"error":"unavailable"}');
+          }
           content = JSON.stringify({ decisions: seenMarks(), actions: [], notes: [] });
         }
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -745,12 +751,18 @@ await section("R13 三/四轮:分块提取(map/reduce),中段唯一决议可提�
     ok("reduce 输入包含中段块提取的决议标记", lastPrompt.includes("CHUNK-DECISION-MARK-2"));
     ok("最终结果纳入中段决议(stub 仅按真实原文回传)", (r.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r.decisions));
     ok("分块为全量核对,不再标注采样截断", r.samplingTruncated === false, `samplingTruncated=${r.samplingTruncated}`);
+    ok("正常 2 块:结果完整(partial=false,无 chunkFailures)", r.partial === false && !(r.chunkFailures || []).length,
+       JSON.stringify({ partial: r.partial, cf: r.chunkFailures }));
 
     // ── 单块空响应:该块如实标注缺失,其余块正常 ──
     state.chunkEmptyIdx = 1; state.prompts.length = 0;
     const r2 = await llm.analyze(mkTranscript(1200, 900), cfg, () => {});
     ok("map 空响应:任务完成但第 1 块标注提取失败", state.prompts[state.prompts.length - 1].includes("第 1 块提取失败"));
     ok("map 空响应:第 2 块决议仍进入最终结果", (r2.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r2.decisions));
+    // F01 红组b:非标记块失败 → 即使关键决议仍存在,也必须强制 partial 且结构化记录
+    ok("F01 红组b:非标记块失败 → 强制 partial=true 且 chunkFailures 记录第 1 块",
+       r2.partial === true && (r2.chunkFailures || []).length === 1 && r2.chunkFailures[0].index === 1,
+       JSON.stringify({ partial: r2.partial, cf: r2.chunkFailures }));
     state.chunkEmptyIdx = null;
 
     // ── 单块坏 JSON:标记所在块失败 → 决议如实丢失(不伪造) ──
@@ -758,7 +770,39 @@ await section("R13 三/四轮:分块提取(map/reduce),中段唯一决议可提�
     const r3 = await llm.analyze(mkTranscript(1200, 900), cfg, () => {});
     ok("map 残缺 JSON:第 2 块标注提取失败", state.prompts[state.prompts.length - 1].includes("第 2 块提取失败"));
     ok("map 残缺 JSON:中段决议不伪造进入结果", !(r3.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r3.decisions));
+    // F01 红组a:标记块失败 → 强制 partial(stub 的 reduce 返回全字段,analyzeOnce 自身 partial=false,不得覆盖失败标志)
+    ok("F01 红组a:标记块坏 JSON → 强制 partial=true 且 chunkFailures 记录第 2 块",
+       r3.partial === true && (r3.chunkFailures || []).map((f) => f.index).join(",") === "2",
+       JSON.stringify({ partial: r3.partial, cf: r3.chunkFailures }));
+    // F01 红组a:模板对用户可见的醒目警示(不可被模型省略)
+    const tmplF01 = require(path.join(ROOT, "server", "minutes-template.cjs"));
+    const r3html = tmplF01.renderMinutes({
+      analysis: r3,
+      meta: { date: "2026-09-22", uploadedAt: "2026-09-22T01:00:00Z", generatedAt: "2026-09-22T02:00:00Z",
+              fileName: "x.mp3", transcriptChars: 100, talkStats: [] },
+    }).html;
+    ok("F01 红组a:模板醒目显示「第 2 块提取失败,纪要可能缺失」", r3html.includes("第 2 块提取失败") && r3html.includes("纪要可能缺失"),
+       `hasBanner=${r3html.includes("第 2 块提取失败")}`);
     state.chunkBadJsonIdx = null;
+
+    // ── F01 红组c:瞬态 503 一次 → map 复用瞬态重试 → 成功则完整交付 ──
+    state.map503Once = true; state.mapReqCount = 0; state.prompts.length = 0;
+    const r5 = await llm.analyze(mkTranscript(1200, 900), cfg, () => {});
+    const map5 = state.prompts.filter((p) => /第 \d+\/\d+ 块/.test(p)).length;
+    ok("F01 红组c:瞬态 503 重试后成功 → 完整(partial=false,无 chunkFailures)",
+       r5.partial === false && !(r5.chunkFailures || []).length, JSON.stringify({ partial: r5.partial, cf: r5.chunkFailures }));
+    ok("F01 红组c:map 复用瞬态重试(2 块共 3 次 map 请求)", map5 === 3, `mapRequests=${map5}`);
+    ok("F01 红组c:重试成功后中段决议仍进结果", (r5.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")));
+    state.map503Once = false; state.mapReqCount = 0;
+
+    // ── F01 红组d:503 重试耗尽 → 逐块结构化记录并强制 partial ──
+    state.map503All = true; state.mapReqCount = 0; state.prompts.length = 0;
+    const r6 = await llm.analyze(mkTranscript(1200, 900), cfg, () => {});
+    ok("F01 红组d:重试耗尽 → 强制 partial=true 且 chunkFailures 逐块记录 1,2",
+       r6.partial === true && (r6.chunkFailures || []).map((f) => f.index).join(",") === "1,2",
+       JSON.stringify({ partial: r6.partial, cf: r6.chunkFailures }));
+    ok("F01 红组d:全部块失败 → 决议不伪造进入结果", !(r6.decisions || []).length, JSON.stringify(r6.decisions));
+    state.map503All = false; state.mapReqCount = 0;
 
     // ── 三块会议:唯一标记在中段(第 2/3 块),前后块不得误含 ──
     state.prompts.length = 0;
@@ -768,10 +812,15 @@ await section("R13 三/四轮:分块提取(map/reduce),中段唯一决议可提�
     ok("三块:仅第 2 块 prompt 含标记,1/3 块不含", !map4[0].includes("CHUNK-DECISION-MARK-2") && map4[1].includes("CHUNK-DECISION-MARK-2") && !map4[2].includes("CHUNK-DECISION-MARK-2"),
        map4.map((m) => m.includes("CHUNK-DECISION-MARK-2")).join(","));
     ok("三块:中段决议进入最终结果", (r4.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r4.decisions));
+    ok("正常 3 块:结果完整(partial=false,无 chunkFailures)", r4.partial === false && !(r4.chunkFailures || []).length,
+       JSON.stringify({ partial: r4.partial, cf: r4.chunkFailures }));
   } finally {
     state.chunkAware = false;
     state.chunkEmptyIdx = null;
     state.chunkBadJsonIdx = null;
+    state.map503Once = false;
+    state.map503All = false;
+    state.mapReqCount = 0;
     chunkSrv.close();
   }
 });
@@ -891,6 +940,52 @@ await section("R18 三轮:媒体内容探测与资源治理", async () => {
   ok("预留后:不上传不超额(incoming=0)", pipeline.quotaExceeded(0) === null, String(pipeline.quotaExceeded(0)));
   releaseA();
   ok("释放预留后恢复", pipeline.quotaExceeded(0) === null, String(pipeline.quotaExceeded(0)));
+
+  /* ── F02(P2):配额投影边界契约——usage+reserved+cl 恰好等于配额必须接受,超 1 字节拒绝 ── */
+  pipeline.invalidateUsageCache();
+  const usageF = pipeline.uploadsUsageBytes();
+  const relM = pipeline.reserveUploadQuota(Q - usageF - 100);
+  ok("F02 边界:incoming 恰好补满配额(=quota)→ 接受", pipeline.quotaExceeded(100) === null, String(pipeline.quotaExceeded(100)));
+  ok("F02 边界:incoming 再多 1 字节 → 拒绝", pipeline.quotaExceeded(101) !== null, String(pipeline.quotaExceeded(101)));
+  relM();
+  // F02 并发:余量 10B,两个 6B 上传——第一个通过并预留后,第二个必须被拒(不得共同越界)
+  pipeline.invalidateUsageCache();
+  const usageG = pipeline.uploadsUsageBytes();
+  const relC1 = pipeline.reserveUploadQuota(Q - usageG - 10);
+  ok("F02 并发A:6B 检查通过", pipeline.quotaExceeded(6) === null, String(pipeline.quotaExceeded(6)));
+  const relC2 = pipeline.reserveUploadQuota(6);   // A 通过检查后完成预留
+  ok("F02 并发B:同 6B 被拒(预留账本防共同越界)", pipeline.quotaExceeded(6) !== null, String(pipeline.quotaExceeded(6)));
+  relC1(); relC2();
+  // F02 HTTP 级边界:余量恰好等于本次上传体积 → 必须 201(修复前中间件先预留后检查,cl 被算两遍 → 误 503)
+  pipeline.invalidateUsageCache();
+  const usageH = pipeline.uploadsUsageBytes();
+  const bb = "----bd" + Math.random().toString(36).slice(2);
+  const bodyB = Buffer.concat([
+    Buffer.from(`--${bb}\r\nContent-Disposition: form-data; name="file"; filename="boundary.wav"\r\nContent-Type: audio/wav\r\n\r\n`),
+    makeWav(1), Buffer.from(`\r\n--${bb}--\r\n`),
+  ]);
+  const relBd = pipeline.reserveUploadQuota(Q - usageH - bodyB.length);
+  let rBd = null;
+  try {
+    rBd = await fetch(BASE + "/api/tasks", { method: "POST", headers: {
+      "Content-Type": `multipart/form-data; boundary=${bb}`, Cookie: cookie, "X-Requested-With": "XMLHttpRequest",
+      "Content-Length": bodyB.length }, body: bodyB });
+    const txtB = await rBd.text();
+    ok("F02 HTTP 边界:余量恰好等于本次上传 → 201(不得因重复计算提前拒绝)", rBd.status === 201, `${rBd.status} ${txtB.slice(0, 80)}`);
+    if (rBd.status === 201) {
+      try {   // 任务在此时设置下会快速失败(本地 ASR stub 已关闭),等终态后清理,不留垃圾任务
+        const tjB = JSON.parse(txtB);
+        for (let i = 0; i < 40; i++) {
+          const stB = await (await api("GET", `/api/tasks/${tjB.id}`)).json();
+          if (stB.stage === "failed" || stB.stage === "done") break;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        await api("DELETE", `/api/tasks/${tjB.id}`);
+      } catch { /* 清理尽力而为 */ }
+    }
+  } finally {
+    relBd();
+  }
   const releaseB = pipeline.reserveUploadQuota(Q);   // 恶意并发:预留直接占满
   try {
     const body503 = "--zz--";

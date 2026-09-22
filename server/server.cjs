@@ -532,20 +532,21 @@ app.get("/api/tasks/:id", (req, res) => {
 
 /* R18 三轮/四轮:上传前资源治理——Content-Length 预检、磁盘水位、总存储配额
    (在 multer 落盘之前拒绝,不消耗磁盘与带宽)。
-   四轮复审 R18:本次上传大小计入配额判断,并按 Content-Length 进入进程内预留账本,
-   并发上传各自预留,不能共享同一个旧缓存值后共同突破配额;请求结束/中断时释放。 */
+   四轮复审 R18/F02:本次上传大小计入配额判断;先检查(usage+在途预留+本次)再预留——
+   两步之间无 await,进程内原子,避免"预留后再检查"把本次 Content-Length 计算两遍,
+   导致接近配额的合法上传被提前拒绝;请求结束/中断时释放。 */
 app.post("/api/tasks", (req, res, next) => {
   const cl = Number(req.headers["content-length"] || 0);
   if (cl > 2 * 1024 * 1024 * 1024 + 64 * 1024) {
     return res.status(413).json({ error: "文件超过 2GB 上限" });
   }
-  const release = reserveUploadQuota(cl);
-  res.on("finish", release);
-  res.on("close", release);
   const shortage = diskShortage();
   if (shortage) return res.status(503).json({ error: shortage });
   const quota = quotaExceeded(cl);
   if (quota) return res.status(503).json({ error: quota });
+  const release = reserveUploadQuota(cl);
+  res.on("finish", release);
+  res.on("close", release);
   next();
 }, upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "缺少文件字段 file" });

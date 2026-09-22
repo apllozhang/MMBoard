@@ -237,7 +237,9 @@ ${chunk}
   };
 }
 
-/** 分块提取主流程:map(逐块)→ reduce(头部原文 + 全部块摘要 + 尾部原文 → 完整纪要) */
+/** 分块提取主流程:map(逐块)→ reduce(头部原文 + 全部块摘要 + 尾部原文 → 完整纪要)。
+ *  F01(P1):任何分块提取失败都必须随最终结果结构化交付——chunkFailures 逐块记录、
+ *  partial 强制为 true,由模板渲染"纪要可能缺失"警示;不得把不完整纪要冒充完整结果。 */
 async function analyzeChunked(transcript, cfg, provider, log) {
   const { connectBaseUrl, originalHost, hostname } = await resolveLlmTarget(cfg.baseUrl, {
     allowedHosts: Array.isArray(cfg.allowedHosts) ? cfg.allowedHosts : [],
@@ -249,13 +251,16 @@ async function analyzeChunked(transcript, cfg, provider, log) {
   const chunks = splitChunks(transcript);
   log(`[llm] 长会分块提取:${chunks.length} 块(每块 ≤30000 字,逐块全量核对,无采样遗漏)`);
   const summaries = [];
+  const chunkFailures = [];
   for (const [i, chunk] of chunks.entries()) {
+    const idx = i + 1;
     try {
-      summaries.push(await mapChunk(chunk, i + 1, chunks.length, mapCfg, connOpts, provider, log));
+      summaries.push(await mapChunkWithRetry(chunk, idx, chunks.length, mapCfg, connOpts, provider, log));
     } catch (e) {
-      // 单块失败不阻塞汇总,但如实标注该块要点可能缺失
-      log(`[llm] 第 ${i + 1} 块提取失败(该块要点可能缺失): ${e.message}`);
-      summaries.push({ idx: i + 1, decisions: [], actions: [], notes: [`(第 ${i + 1} 块提取失败,内容可能缺失)`] });
+      // 单块失败不阻塞汇总,但必须结构化留痕并在最终结果强制 partial(不得静默丢失)
+      log(`[llm] 第 ${idx} 块提取失败(该块要点可能缺失): ${e.message}`);
+      chunkFailures.push({ index: idx, reason: String(e.message).slice(0, 200) });
+      summaries.push({ idx, decisions: [], actions: [], notes: [`(第 ${idx} 块提取失败,内容可能缺失)`] });
     }
   }
   const fmtActions = (acts) => acts.map((a) => `${a.owner || ""}:${a.item || ""}${a.due ? `(${a.due})` : ""}`).join(";") || "无";
@@ -266,14 +271,38 @@ async function analyzeChunked(transcript, cfg, provider, log) {
   const synthetic = `${head}\n[……中段内容已逐块完整核对,以下为各块提取的关键信息,必须纳入纪要对应章节,不得遗漏任何决议与行动项……]\n${summaryText}\n[……中段结束……]\n${tail}`;
   log(`[llm] 分块汇总:转写 ${transcript.length} 字 → ${chunks.length} 份块摘要 + 头尾原文 ${synthetic.length} 字`);
 
-  let lastErr;
+  let lastErr, result;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      return await analyzeOnce(synthetic, cfg, provider, log, attempt);
+      result = await analyzeOnce(synthetic, cfg, provider, log, attempt);
+      break;
     } catch (e) {
       lastErr = e;
       if (e.noRetry || attempt === 2) throw e;
       log(`[llm] 汇总第 1 次调用失败(${String(e.message).slice(0, 80)}),3s 后自动重试`);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+  if (!result) throw lastErr;
+  // F01:map 失败标志不得被 reduce 的完整字段覆盖——强制 partial 并随结果持久化
+  if (chunkFailures.length) {
+    result.partial = true;
+    result.chunkFailures = chunkFailures;
+  }
+  return result;
+}
+
+/** map 单块瞬态重试(F01 要求:复用与 analyze 相同的瞬态错误重试策略;
+ *  noRetry 的确定性 4xx 立即失败,连续解析失败在重试耗尽后进入失败标记) */
+async function mapChunkWithRetry(chunk, idx, total, cfg, connOpts, provider, log) {
+  let lastErr;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await mapChunk(chunk, idx, total, cfg, connOpts, provider, log);
+    } catch (e) {
+      lastErr = e;
+      if (e.noRetry || attempt === 2) throw e;
+      log(`[llm] 第 ${idx} 块第 1 次提取失败(${String(e.message).slice(0, 80)}),3s 后重试`);
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
@@ -322,6 +351,8 @@ function normalizeAnalysis(a) {
   return {
     title: str(a.title),   // 二轮测试发现:title 曾在此改造中被误删,分析标题恒空(模板回退"会议纪要")
     missingFields,
+    // F01:分块提取失败的结构化留痕随规范化透传(渲染层据此显示"纪要可能缺失"警示)
+    chunkFailures: arr(a.chunkFailures).map((f) => ({ index: Number(f.index) || 0, reason: str(f.reason).slice(0, 200) })),
     summary: str(a.summary),
     topics: arr(a.topics).map((t) => ({ heading: str(t.heading), person: str(t.person), detail: str(t.detail) })),
     decisions: strArr(a.decisions),

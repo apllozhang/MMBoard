@@ -96,6 +96,10 @@ function noticeBannerHtml(meta, a) {
   if (meta.analysisMode === "mock") tags.push("AI 分析为演示模拟数据");
   if (a && a.samplingTruncated) tags.push("分析基于转写采样(非全文,部分中段未覆盖)");
   if (a && a.partial) tags.push("AI 输出被截断或字段缺失,本纪要为部分结果");
+  // F01(P1):分块提取失败——最终模板渲染的醒目警示,不依赖模型输出,不可被省略
+  if (a && Array.isArray(a.chunkFailures) && a.chunkFailures.length) {
+    tags.push(`第 ${a.chunkFailures.map((f) => Number(f.index) || "?").join("、")} 块提取失败,纪要可能缺失,建议重跑分析`);
+  }
   if (a && Array.isArray(a.missingFields) && a.missingFields.length) {
     tags.push(`分析未生成章节:${a.missingFields.map(esc).join("、")}`);
   }
