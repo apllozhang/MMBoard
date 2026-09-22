@@ -108,6 +108,12 @@ await section("A1 认证:损坏配置 fail-closed、一次性随机密码、原�
   const f2 = path.join(d2, "auth.json");
   auth.saveAuth(d2, a2);
   ok("saveAuth 原子写:无 .tmp 残留", !fs.existsSync(f2 + ".tmp"));
+  const d4 = fs.mkdtempSync(path.join(os.tmpdir(), "mmb-a4-"));
+  const f4 = path.join(d4, "auth.json");
+  process.env.MMB_ADMIN_PASSWORD = "InitPass-check";
+  auth.loadAuth(d4);
+  process.env.MMB_ADMIN_PASSWORD = prev;
+  ok("首次初始化 auth.json 原子写:无 .tmp 残留(二轮复审 R03)", !fs.existsSync(f4 + ".tmp") && JSON.parse(fs.readFileSync(f4, "utf8")).username === "admin");
 });
 
 await section("B persist:原子写、损坏恢复、隔离与双坏抛错", async () => {

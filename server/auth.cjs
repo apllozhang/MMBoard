@@ -44,7 +44,10 @@ function loadAuth(DATA) {
     createdAt: new Date().toISOString(),
     defaultPassword: true,
   };
-  fs.writeFileSync(f, JSON.stringify(auth, null, 2));
+  // 二轮复审 R03:首次初始化与 saveAuth 同一保护——临时文件 + rename 原子写,显式 0600(仅属主可读写)
+  const tmp = f + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(auth, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, f);
   console.log("=".repeat(64));
   console.log(`[auth] 首次初始化账号: admin / ${password}`);
   console.log(`[auth] 请立即登录并修改密码(此密码仅本次启动日志可见)`);
