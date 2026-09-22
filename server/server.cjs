@@ -12,12 +12,12 @@ const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const auth = require("./auth.cjs");
-const { renderMinutes } = require("./minutes-template.cjs");
+const { renderMinutes, applyMapToText, applySpeakerMapDeep } = require("./minutes-template.cjs");
 const { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay,
         DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
 const { hasKeys } = require("./iflytek.cjs");
 const { writeJsonAtomic, readJsonWithRecovery } = require("./persist.cjs");
-const { assertLlmUrl } = require("./llm.cjs");
+const { assertLlmUrl, hasUsableConfig } = require("./llm.cjs");
 
 /** 每日转写免费额度基准(秒):讯飞 lfasr 普遍规则为每日约 2 小时,可在 data/settings.json
  *  加 "asrDailyQuotaSeconds": <秒> 覆盖;余量提示始终为本地估算,以讯飞控制台为准 */
@@ -110,12 +110,14 @@ function loadSecret() {
   const ifly = st.iflytek && st.iflytek.appId ? st.iflytek : s.iflytek;
   if (ifly && ifly.appId) {
     s.iflytek = { appId: String(ifly.appId).trim(), apiKey: String(ifly.apiKey || "").trim(),
-                  apiSecret: String(ifly.apiSecret || ifly.secretKey || "").trim() };
+                  apiSecret: String(ifly.apiSecret || ifly.secretKey || "").trim(),
+                  demo: !!ifly.demo };   // R06:显式演示开关随配置透传(此前 settings 路径丢失该字段)
   }
-  // R06 复审:mock 仅在显式演示开关下允许(MMB_DEMO=1 或配置 demo:true)
+  // R06 复审:mock 仅在显式演示开关下允许(MMB_DEMO=1 或配置 demo:true);
+  // 无 LLM 配置时同样标记 demo——demo 语义 = 无配置走 mock 而非报错(回归/演示环境依赖此行为)
   if (process.env.MMB_DEMO === "1") {
     s.iflytek = { ...(s.iflytek || {}), demo: true };
-    if (s.llm) s.llm.demo = true;
+    s.llm = { ...(s.llm || {}), demo: true };
   }
   if (s.llm) s.llm.allowPrivate = !!st.allowPrivateLlmHosts;   // R05:回退路径同样受白名单开关控制
   return s;
@@ -286,7 +288,8 @@ app.get("/api/meta", async (_req, res) => {
   res.json({
     ffmpeg: hasFfmpeg,
     iflytekConfigured: hasKeys(secret.iflytek || {}),
-    llmConfigured: !!secret.llm?.apiKey,
+    llmConfigured: hasUsableConfig(secret.llm || {}),   // 二轮复审 §5.4:与执行层同一判定函数
+    settingsVersion: Number(loadSettings().version || 0),   // R22:asr 快捷切换的冲突控制基准
     asrProvider,
     localAsrOnline,
   });
@@ -426,10 +429,18 @@ app.post("/api/settings/test", async (req, res) => {
   }
 });
 
-/* ── 转写通道轻量切换(看板快捷开关用;只动 asr,不碰模型列表) ── */
+/* ── 转写通道轻量切换(看板快捷开关用;只动 asr,不碰模型列表) ──
+   二轮复审 R22:纳入 version 冲突控制——本端点是设置写路径,必须与主 PUT 同等防护:
+   缺 version 400(旧客户端需刷新),不匹配 409(另一窗口已保存),成功递增 version。 */
 app.put("/api/settings/asr", (req, res) => {
   const st = loadSettings();
   const body = req.body || {};
+  if (body.version === undefined || !Number.isFinite(Number(body.version))) {
+    return res.status(400).json({ error: "缺少 version(请刷新页面获取最新设置后重试)" });
+  }
+  if (Number(body.version) !== Number(st.version || 0)) {
+    return res.status(409).json({ error: "设置已被其他窗口修改并保存,为避免覆盖已取消本次切换;请刷新页面后重试" });
+  }
   if (body.provider) {
     st.asr = { ...(st.asr || { localUrl: "" }), provider: body.provider === "local" ? "local" : "iflytek" };
   }
@@ -439,9 +450,10 @@ app.put("/api/settings/asr", (req, res) => {
   if (st.asr.provider === "local" && st.asr.localUrl && !validLocalUrl(st.asr.localUrl)) {
     return res.status(400).json({ error: "本地服务地址仅允许内网/本机地址" });
   }
-  saveSettings(st);
+  const newVersion = Number(st.version || 0) + 1;
+  saveSettings({ ...st, version: newVersion });
   audit(req, "settings.asr", `${st.asr.provider} ${st.asr.localUrl}`);
-  res.json({ ok: true, asr: st.asr });
+  res.json({ ok: true, version: newVersion, asr: st.asr });
 });
 
 /* ── 转写通道测试:探测本地 FunASR 服务(R05:限流 + 内网地址白名单) ── */
@@ -537,6 +549,8 @@ app.get("/api/tasks/:id/rerun-preview", async (req, res) => {
     freeSeconds,
     enough: freeSeconds >= audioSeconds,
     mock: provider === "iflytek" && !hasKeys(loadSecret().iflytek || {}),   // 讯飞通道且配置不完整 = 模拟转写
+    llmConfigured: hasUsableConfig(loadSecret().llm || {}),   // 二轮复审 §5.4:预览与执行同一判定
+    demoMode: process.env.MMB_DEMO === "1" || !!(loadSecret().iflytek || {}).demo,
   });
 });
 
@@ -569,9 +583,8 @@ app.post("/api/tasks/:id/restart", (req, res) => {
     if (!transcript || !transcript.text || String(transcript.text).length < 10) {
       return res.status(400).json({ error: "已存转写文本为空,请用「整条重跑」" });
     }
-    // 说话人标注应用:GLM 拿到的即真实姓名(person 归属更准)
-    const smap = transcript.speakerMap || {};
-    if (Object.keys(smap).length) transcript.text = applyMapToText(transcript.text, smap);
+    // 二轮复审 §5.1(canonical 原则):LLM 永远接收「说话人N」编号文本,不做姓名替换——
+    // 姓名只由渲染层按当前 speakerMap 映射,任意次改名都不会把旧姓名固化进分析结果
   }
 
   t.steps.forEach((s) => { s.status = "pending"; s.note = ""; s.startedAt = null; s.finishedAt = null; });
@@ -590,22 +603,7 @@ app.post("/api/tasks/:id/restart", (req, res) => {
 
 /* ── 说话人手动标注(R15 人工确认):映射存 transcript.json 与 task,
       「重新跑分析」自动应用真名;有 analysis.json 时可纯重渲染(零额度零耗时) ── */
-function applyMapToText(text, map) {
-  const keys = Object.keys(map).sort((a, b) => Number(b) - Number(a));   // 长编号优先,防 1 吞 10
-  for (const k of keys) text = text.split(`说话人${k}`).join(map[k]);
-  return text;
-}
-
-function applySpeakerMapDeep(obj, map) {
-  if (typeof obj === "string") return applyMapToText(obj, map);
-  if (Array.isArray(obj)) return obj.map((x) => applySpeakerMapDeep(x, map));
-  if (obj && typeof obj === "object") {
-    const out = {};
-    for (const k of Object.keys(obj)) out[k] = applySpeakerMapDeep(obj[k], map);
-    return out;
-  }
-  return obj;
-}
+/* applyMapToText / applySpeakerMapDeep 移至 minutes-template.cjs(二轮复审 §5.1:姓名只在渲染层映射) */
 
 function rebuildTalkStats(segments, hasSpeakers, map = {}) {
   if (!hasSpeakers || !Array.isArray(segments) || !segments.length) return [];

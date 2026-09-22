@@ -22,6 +22,26 @@ function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/* ── 说话人姓名映射(二轮复审 §5.1:姓名只在最终渲染层映射) ──
+ * canonical 原则:analysis/transcript 全程只含「说话人N」稳定标识;
+ * 本模块在渲染前把编号替换为当前人工标注名,任意次改名都不会残留旧姓名。 */
+function applyMapToText(text, map) {
+  const keys = Object.keys(map).sort((a, b) => Number(b) - Number(a));   // 长编号优先,防 1 吞 10
+  for (const k of keys) text = text.split(`说话人${k}`).join(map[k]);
+  return text;
+}
+
+function applySpeakerMapDeep(obj, map) {
+  if (typeof obj === "string") return applyMapToText(obj, map);
+  if (Array.isArray(obj)) return obj.map((x) => applySpeakerMapDeep(x, map));
+  if (obj && typeof obj === "object") {
+    const out = {};
+    for (const k of Object.keys(obj)) out[k] = applySpeakerMapDeep(obj[k], map);
+    return out;
+  }
+  return obj;
+}
+
 /** R06/R15:模拟数据、采样覆盖、输出截断——任一情况全程醒目标识(含移动端,不隐藏) */
 function noticeBannerHtml(meta, a) {
   const tags = [];
@@ -524,4 +544,4 @@ ${hasChart ? `<script>
   };
 }
 
-module.exports = { renderMinutes };
+module.exports = { renderMinutes, applyMapToText, applySpeakerMapDeep };

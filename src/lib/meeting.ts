@@ -37,6 +37,7 @@ export interface ServerMeta {
   ffmpeg: boolean;
   iflytekConfigured: boolean;
   llmConfigured: boolean;
+  settingsVersion?: number;            // R22:asr 快捷切换的冲突控制基准
   asrProvider?: "iflytek" | "local";   // 当前转写通道
   localAsrOnline?: boolean;            // 本地转写服务在线(仅 local 通道时有意义)
 }
@@ -145,16 +146,21 @@ export async function fetchRerunPreview(id: string): Promise<RerunPreview> {
   return res.json() as Promise<RerunPreview>;
 }
 
-/** 转写通道轻量切换(看板快捷开关;只动 asr,不碰模型列表) */
-export async function patchAsrProvider(provider: "iflytek" | "local") {
+/** 转写通道轻量切换(看板快捷开关;只动 asr,不碰模型列表)
+ *  二轮复审 R22:服务端强制 version 冲突控制——调用方需传入当前 settings version。 */
+export async function patchAsrProvider(provider: "iflytek" | "local", version: number) {
   const res = await fetch("/api/settings/asr", {
     method: "PUT",
     headers: CSRF,
-    body: JSON.stringify({ provider }),
+    body: JSON.stringify({ provider, version }),
   });
   handle401(res);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<{ ok: boolean; asr: { provider: string; localUrl: string } }>;
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json() as Promise<{ ok: boolean; version: number; asr: { provider: string; localUrl: string } }>;
 }
 
 /* ── 流水线进度估算 ──

@@ -2,8 +2,11 @@
 node_modules/
 dist/
 
-# 密钥与敏感配置(绝不入库)
+# 密钥与敏感配置(绝不入库;含备份/临时副本)
 server/meeting.secret.json
+server/meeting.secret.json.bak
+server/meeting.secret.json.tmp
+server/meeting.secret.json.*.bak
 deploy.secret.json
 
 # 运行时数据(上传文件/任务状态/纪要产物)

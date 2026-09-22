@@ -83,6 +83,12 @@ function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000) {
 /** 分析转写文本 → 结构化纪要数据(双协议:anthropic Messages / openai chat.completions)
  *  R17+:瞬态失败(空正文/超时/解析失败)自动重试一次——GLM-5.3-Flash 偶发把预算全部
  *  花在思考上(响应 0 字 stop=max_tokens),同输入重试即可成功 */
+/** 统一配置判定(R06 二轮 §5.4):meta/预览/任务执行/纪要横幅共用同一函数,
+ *  避免"界面显示已配置、执行却静默 mock"的口径分裂 */
+function hasUsableConfig(cfg) {
+  return !!(cfg && cfg.baseUrl && cfg.apiKey && cfg.model && !cfg.apiKey.startsWith("在此"));
+}
+
 async function analyze(transcript, cfg, log = console.log) {
   const provider = cfg?.provider === "anthropic" ? "anthropic" : "openai";
   if (cfg?.demo) {
@@ -90,10 +96,10 @@ async function analyze(transcript, cfg, log = console.log) {
     log("[llm] 演示模式 → mock 分析(忽略真实配置)");
     return { ...mockAnalysis(transcript), mock: true };
   }
-  const usable = cfg && cfg.baseUrl && cfg.apiKey && cfg.model && !cfg.apiKey.startsWith("在此");
-  if (!usable) {
-    log("[llm] 未配置 → mock 分析");
-    return { ...mockAnalysis(transcript), mock: true };
+  if (!hasUsableConfig(cfg)) {
+    // 二轮复审 §5.4:非 demo 环境缺 LLM 配置必须明确失败,绝不静默生成模拟分析
+    log("[llm] 未配置 → 明确失败(非 demo 环境禁止静默 mock)");
+    throw new Error("LLM 分析未配置(baseUrl/apiKey/model 不完整),且未开启演示模式(MMB_DEMO=1)——拒绝静默生成模拟分析");
   }
   let lastErr;
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -189,6 +195,7 @@ function normalizeAnalysis(a) {
   const REQUIRED = ["title", "summary", "topics", "decisions", "actions"];
   const missingFields = REQUIRED.filter((k) => !(k in a) || a[k] == null);
   return {
+    title: str(a.title),   // 二轮测试发现:title 曾在此改造中被误删,分析标题恒空(模板回退"会议纪要")
     missingFields,
     summary: str(a.summary),
     topics: arr(a.topics).map((t) => ({ heading: str(t.heading), person: str(t.person), detail: str(t.detail) })),
@@ -361,4 +368,4 @@ function mockAnalysis(transcript) {
   };
 }
 
-module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson, assertLlmUrl, isPrivateIp };   // 后四者导出供回归测试
+module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson, assertLlmUrl, isPrivateIp, hasUsableConfig };   // 后五者导出供回归测试

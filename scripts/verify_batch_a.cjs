@@ -38,6 +38,43 @@ const DATA = process.env.MMB_DATA_DIR;
 
 const auth = require(path.join(ROOT, "server", "auth.cjs"));
 const persist = require(path.join(ROOT, "server", "persist.cjs"));
+const http = require("http");
+
+/* stub LLM(OpenAI 形状):捕获收到的 prompt;mode 切换响应行为,供故障注入与 canonical 断言 */
+function startLlmStub() {
+  const state = { prompts: [], mode: "ok" };
+  const srv = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => body += c);
+    req.on("end", () => {
+      state.prompts.push(body);
+      if (state.mode === "429") { res.writeHead(429, { "Content-Type": "application/json" }); return res.end('{"error":"rate limited"}'); }
+      if (state.mode === "503") { res.writeHead(503, { "Content-Type": "application/json" }); return res.end('{"error":"unavailable"}'); }
+      if (state.mode === "big") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ choices: [{ message: { content: "x".repeat(11 * 1024 * 1024) }, finish_reason: "stop" }] }));
+      }
+      // 模拟提示词约束生效:模型 person/owner 一律输出「说话人N」编号
+      const content = JSON.stringify({ title: "T", summary: "说话人0 讨论了方案", topics: [], decisions: ["通过"],
+        actions: [{ owner: "说话人0", item: "落地执行", due: "周一" }], risks: [], highlights: [] });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: "stop" }] }));
+    });
+  });
+  return new Promise((resolve) => srv.listen(0, "127.0.0.1", () => resolve({ srv, state, port: srv.address().port })));
+}
+
+function makeWav(seconds = 2) {
+  const n = 16000 * seconds;
+  const buf = Buffer.alloc(44 + n * 2);
+  buf.write("RIFF", 0); buf.writeUInt32LE(36 + n * 2, 4); buf.write("WAVE", 8);
+  buf.write("fmt ", 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22); buf.writeUInt32LE(16000, 24); buf.writeUInt32LE(32000, 28);
+  buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34);
+  buf.write("data", 36); buf.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) buf.writeInt16LE(Math.round(8000 * Math.sin(i * 0.08)), 44 + i * 2);
+  return buf;
+}
 const iflytek = require(path.join(ROOT, "server", "iflytek.cjs"));
 const llm = require(path.join(ROOT, "server", "llm.cjs"));
 const { renderMinutes } = require(path.join(ROOT, "server", "minutes-template.cjs"));
@@ -193,7 +230,9 @@ await section("A4/R19 部署与本地 ASR 静态断言", async () => {
   ok("候选与生产运行均使用不可变 imageId(sha256)", dep.includes("'{{.Id}}'") && dep.includes("runProd = await run(conn") && dep.includes("${imageId}"));
   ok("回滚依据旧容器不可变镜像 ID(非可变标签)", dep.includes("'{{.Image}}'") && dep.includes("${oldImageId}"));
   ok("健康检查逐项断言 2xx(curl -sf + 正则)", dep.includes("curl -sf") && dep.includes("/^2\\d\\d$/"));
-  ok("候选容器挂载生产数据卷", dep.includes("-v ${DATA_VOL}:/app/server/data ${imageId}"));
+  ok("候选使用独立数据卷快照(二轮 §5.2:不挂生产卷)", dep.includes("${NAME}-cand-data") && !dep.includes("-v ${DATA_VOL}:/app/server/data ${imageId}"));
+  ok("生产容器仍挂生产数据卷", dep.includes("-v ${DATA_VOL}:/app/server/data --restart unless-stopped"));
+  ok("DRILL 模式实测回滚后版本", dep.includes("DEPLOY_DRILL") && dep.includes("回滚已实测"));
   ok("远端解包前清理旧残留", dep.includes(`rm -rf \${REMOTE_DIR}`));
 
   const py = fs.readFileSync(path.join(ROOT, "tools", "local-asr", "server.py"), "utf8");
@@ -315,6 +354,139 @@ await section("R02 编号不回收与 uuid 目录键(单元级)", async () => {
   // 清理本段任务记录
   const tasks = pipeline.loadTasks().filter((t) => t.id !== a.id && t.id !== b.id && t.id !== c.id);
   pipeline.saveTasks(tasks);
+});
+
+await section("R05 补充:LLM 非 demo 缺配置明确失败(二轮 §5.4)", async () => {
+  let err = "";
+  try { await llm.analyze("转写文本内容超过十个字", {}, () => {}); } catch (e) { err = e.message; }
+  ok("非 demo 缺 LLM 配置 → analyze 明确抛错", err.includes("拒绝静默生成模拟分析"), err);
+  ok("hasUsableConfig 统一判定", llm.hasUsableConfig({ baseUrl: "http://x", apiKey: "k", model: "m" }) === true && llm.hasUsableConfig({}) === false);
+  const demo = await llm.analyze("转写文本内容超过十个字", { demo: true }, () => {});
+  ok("显式 demo 才允许 mock", demo.mock === true);
+});
+
+/* ── provider 故障注入(运行期:真实 HTTP stub,真实 postJson/重试/上限逻辑) ── */
+await section("R17 provider 故障注入(stub:429/503/超大响应/成功)", async () => {
+  const { srv, state, port } = await startLlmStub();
+  const cfg = { provider: "openai", baseUrl: `http://127.0.0.1:${port}`, apiKey: "stub-key", model: "stub-model", allowPrivate: true };
+  const T = "这是一段用于故障注入的转写文本,长度超过十个字。";
+  try {
+    state.mode = "ok";
+    const good = await llm.analyze(T, cfg, () => {});
+    ok("stub 正常响应 → analyze 成功", good.mock === false && good.title === "T");
+
+    state.mode = "429"; state.prompts.length = 0;
+    let e429 = "";
+    try { await llm.analyze(T, cfg, () => {}); } catch (e) { e429 = e.message; }
+    ok("429 → 不重试直接失败(单次请求)", e429.includes("429") && state.prompts.length === 1, `${e429} prompts=${state.prompts.length}`);
+
+    state.mode = "503"; state.prompts.length = 0;
+    let e503 = "";
+    try { await llm.analyze(T, cfg, () => {}); } catch (e) { e503 = e.message; }
+    ok("503 → 瞬态错误自动重试一次(共两次请求)", e503.includes("503") && state.prompts.length === 2, `prompts=${state.prompts.length}`);
+
+    state.mode = "big";
+    let ebig = "";
+    try { await llm.analyze(T, cfg, () => {}); } catch (e) { ebig = e.message; }
+    ok("超大响应体被截断并报错", ebig.includes("上限") || ebig.includes("10MB"), ebig.slice(0, 80));
+  } finally {
+    srv.close();
+    state.mode = "ok";
+  }
+});
+
+/* ── speaker canonical 端到端(二轮 §5.1:stub LLM 真实跑流水线,验证改名不固化) ── */
+await section("speaker canonical 端到端(stub LLM + mock 转写)", async () => {
+  const { srv, state, port } = await startLlmStub();
+  try {
+    // 设置:讯飞 demo(mock 转写)+ stub LLM(真实调用,非 demo)
+    persist.writeJsonAtomic(path.join(DATA, "settings.json"), {
+      version: 100, activeId: "stub-model-1", allowPrivateLlmHosts: true,
+      models: [{ id: "stub-model-1", name: "stub", provider: "openai", baseUrl: `http://127.0.0.1:${port}`, model: "stub", apiKey: "stub-key" }],
+      asr: { provider: "iflytek", localUrl: "" },
+      iflytek: { appId: "stub-app", apiSecret: "stub-secret", demo: true },
+    });
+    // 上传 wav → 全流水线(mock 转写 + stub 分析)
+    const b = "----rb" + Math.random().toString(36).slice(2);
+    const wav = makeWav(2);
+    const body = Buffer.concat([
+      Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="spk-check.wav"\r\nContent-Type: audio/wav\r\n\r\n`),
+      wav, Buffer.from(`\r\n--${b}--\r\n`),
+    ]);
+    let up = await fetch(BASE + "/api/tasks", { method: "POST", headers: {
+      "Content-Type": `multipart/form-data; boundary=${b}`, Cookie: cookie, "X-Requested-With": "XMLHttpRequest",
+      "Content-Length": body.length }, body });
+    ok("上传测试音频成功", up.status === 201, String(up.status));
+    const task = await up.json();
+    let final = null;
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      final = await (await api("GET", `/api/tasks/${task.id}`)).json();
+      if (final.stage === "done" || final.stage === "failed") break;
+    }
+    ok("流水线完成(stub LLM 真实调用)", final && final.stage === "done", JSON.stringify(final?.error || final?.stage));
+
+    // 第一次改名 → 纪要含「改名甲」
+    await api("PUT", `/api/tasks/${task.id}/speakers`, { map: { "0": "改名甲" } });
+    let min1 = await (await api("GET", `/api/tasks/${task.id}/minutes`)).text();
+    ok("改名甲后纪要含新名", min1.includes("改名甲"));
+
+    // 重新跑分析:stub 收到的 prompt 必须仍是 canonical「说话人N」,不含已标注的真名
+    state.prompts.length = 0;
+    await api("POST", `/api/tasks/${task.id}/restart`, { scope: "analyze" });
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      final = await (await api("GET", `/api/tasks/${task.id}`)).json();
+      if (final.stage === "done" || final.stage === "failed") break;
+    }
+    ok("重跑分析完成", final && final.stage === "done", JSON.stringify(final?.error || final?.stage));
+    const sentPrompt = decodeURIComponent(state.prompts.join(""));
+    ok("LLM 输入保持 canonical(含转写原文,不含已标注的真名)", state.prompts.length > 0 && sentPrompt.includes("平台组例会") && !sentPrompt.includes("改名甲"),
+       `prompts=${state.prompts.length}`);
+
+    // 第二次改名 → 纯重渲染后正文/统计只出现新名,旧名零残留
+    await api("PUT", `/api/tasks/${task.id}/speakers`, { map: { "0": "改名乙" } });
+    const min2 = await (await api("GET", `/api/tasks/${task.id}/minutes`)).text();
+    ok("二次改名后纪要含新名「改名乙」", min2.includes("改名乙"));
+    ok("二次改名后旧名「改名甲」零残留", !min2.includes("改名甲"));
+    // 清理测试任务
+    await api("DELETE", `/api/tasks/${task.id}`);
+  } finally {
+    srv.close();
+    // 恢复 settings,避免影响后续段
+    persist.writeJsonAtomic(path.join(DATA, "settings.json"), { activeId: null, models: [] });
+  }
+});
+
+await section("R02 高水位:删除当天最新任务后编号不复用(运行期)", async () => {
+  const pipeline = require(path.join(ROOT, "server", "pipeline.cjs"));
+  const a = pipeline.createTask("hw-a.wav", "a.wav", 1);
+  const latest = pipeline.createTask("hw-b.wav", "b.wav", 1);   // 当天最大编号
+  // 模拟复审隔离复现:删除最新任务(任务记录与 MT 目录占用都消失)
+  const tasks = pipeline.loadTasks().filter((t) => t.id !== latest.id);
+  pipeline.saveTasks(tasks);
+  const next = pipeline.createTask("hw-c.wav", "c.wav", 1);
+  ok("删除最新编号后再创建不复用(高水位持久化)", next.id !== latest.id, `${latest.id} → ${next.id}`);
+  ok("编号单调递增", next.id > a.id && next.id > latest.id);
+  const hw = JSON.parse(fs.readFileSync(path.join(DATA, "seq-highwater.json"), "utf8"));
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  ok("高水位文件记录当日已分配序号", Number(hw[day]) >= parseInt(latest.id.split("-").pop(), 10), JSON.stringify(hw));
+  const cleanup = pipeline.loadTasks().filter((t) => t.id !== a.id && t.id !== next.id);
+  pipeline.saveTasks(cleanup);
+});
+
+await section("R22 补充:settings/asr 纳入 version 冲突控制(运行期)", async () => {
+  persist.writeJsonAtomic(path.join(DATA, "settings.json"), { version: 7, activeId: null, models: [], asr: { provider: "iflytek", localUrl: "" } });
+  const noVer = await api("PUT", "/api/settings/asr", { provider: "local" });
+  ok("缺 version → 400(旧客户端需刷新)", noVer.status === 400, `实际 ${noVer.status}`);
+  const badVer = await api("PUT", "/api/settings/asr", { provider: "local", version: 3 });
+  ok("旧 version → 409(拒绝覆盖他人修改)", badVer.status === 409, `实际 ${badVer.status}`);
+  const good = await api("PUT", "/api/settings/asr", { provider: "local", version: 7 });
+  const gj = await good.json();
+  ok("匹配 version → 成功且递增", good.status === 200 && gj.version === 8, `实际 ${good.status}`);
+  const st = await (await api("GET", "/api/settings")).json();
+  ok("GET settings 版本与写路径一致", st.version === 8, `实际 ${st.version}`);
+  await api("PUT", "/api/settings/asr", { provider: "iflytek", version: gj.version });
 });
 
 await section("集成:队列满防线(单元级)与 restart 前置检查顺序", async () => {

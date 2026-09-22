@@ -14,7 +14,7 @@ const { writeJsonAtomic, readJsonWithRecovery } = require("./persist.cjs");
 const { transcribe } = require("./iflytek.cjs");
 const localAsr = require("./local.cjs");
 const { analyze } = require("./llm.cjs");
-const { renderMinutes } = require("./minutes-template.cjs");
+const { renderMinutes, applySpeakerMapDeep } = require("./minutes-template.cjs");
 
 // 数据目录:默认随程序目录;隔离测试用 MMB_DATA_DIR 覆盖(生产不受影响)
 const DATA = process.env.MMB_DATA_DIR || path.join(__dirname, "data");
@@ -158,14 +158,20 @@ function checkRunAlive(taskId, runId) {
 }
 
 /** createTask:storageKey 为 uploads 内唯一存储键;originalName 仅作展示与标题。
- *  R02 复审整改:uuid 为不可复用的产物目录键(task.dirKey),MT-展示编号单调递增不回收——
- *  删除产生的空号不再被复用,残留目录与并发创建都不会导致编号/目录共享。 */
+ *  R02 复审整改(二轮 §3.1):uuid 为不可复用的产物目录键;展示编号单调递增且**高水位独立持久化**——
+ *  删除当天最大编号(不留任务记录、新目录为 uuid 无 MT 占位)后,高水位文件仍阻止该编号复用,
+ *  旧书签/审计/外部调用保存的 /api/tasks/MT-xxx 永远不会指向另一条任务。 */
+const SEQ_FILE = path.join(DATA, "seq-highwater.json");   // {"YYYYMMDD": 已分配最大序号}
+function loadSeqHighwater() {
+  try { return readJsonWithRecovery(SEQ_FILE); } catch { return {}; }   // 损坏/不存在按零起点(扫描兜底)
+}
+
 function createTask(storageKey, originalName, sizeBytes) {
   const tasks = loadTasks();
   const d = new Date();
   const day = d.toISOString().slice(0, 10).replace(/-/g, "");
-  let maxSeq = 0;   // 当日已用最大序号(现存任务 + 残留输出目录)
-  for (const t of tasks) {
+  let maxSeq = Number(loadSeqHighwater()[day]) || 0;   // 持久化高水位(删除不复用的保证)
+  for (const t of tasks) {                             // 现存任务与残留目录取 max(兼容手工数据/迁移)
     const m = /^MT-\d{8}-(\d+)$/.exec(t.id || "");
     if (m && t.id.startsWith(`MT-${day}`)) maxSeq = Math.max(maxSeq, parseInt(m[1], 10));
   }
@@ -176,6 +182,7 @@ function createTask(storageKey, originalName, sizeBytes) {
     }
   } catch { /* outputs 不存在时忽略 */ }
   const seq = maxSeq + 1;
+  writeJsonAtomic(SEQ_FILE, { ...loadSeqHighwater(), [day]: seq });
   const uuid = randomUUID();
   const task = {
     id: `MT-${day}-${String(seq).padStart(3, "0")}`,   // 展示编号(单调分配,不复用)
@@ -338,16 +345,21 @@ async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers
     setStep(task.id, task.runId, "render", "running");
     const outDir = taskDir(task);
     fs.mkdirSync(outDir, { recursive: true });
+    // 二轮复审 §5.1:姓名只在渲染层映射——analysis/talkStats 落盘保持 canonical(说话人N),
+    // 渲染 HTML 时才应用当前人工标注,之后任意次改名纯重渲染都正确
+    const speakerMap = task.speakerMap || {};
+    const analysisForRender = Object.keys(speakerMap).length ? applySpeakerMapDeep(analysis, speakerMap) : analysis;
+    const talkStatsForRender = talkStats.map((x) => ({ ...x, speaker: speakerMap[String(x.speaker).replace(/^说话人/, "")] || x.speaker }));
     const { html, fileName } = renderMinutes({
-      analysis,
+      analysis: analysisForRender,
       meta: { date: task.createdAt.slice(0, 10), fileName: task.originalFileName || task.fileName,
-              transcriptChars: text.length, talkStats,
+              transcriptChars: text.length, talkStats: talkStatsForRender,
               transcriptionMode, analysisMode: analysis.mock ? "mock" : "real",
               uploadedAt: task.createdAt, generatedAt: new Date().toISOString(),
               meetingOccurredAt: null },
     });
     fs.writeFileSync(path.join(outDir, fileName), html, "utf8");
-    // 说话人标注纯重渲染的依据:分析结果 + 发言统计 + 渲染元信息落盘
+    // 说话人标注纯重渲染的依据:分析结果(canonical)+ 发言统计(canonical)+ 渲染元信息落盘
     fs.writeFileSync(path.join(outDir, "analysis.json"), JSON.stringify({
       analysis,
       talkStats,

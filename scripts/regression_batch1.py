@@ -97,16 +97,19 @@ RUNNING_STEPS = [
 ]
 
 def wait_stage(tid, stage, timeout=90, cookie=None):
+    last = None
     for _ in range(timeout):
         time.sleep(1)
         c, t, _ = req(f"/api/tasks/{tid}", cookie=cookie)
+        last = (c, str(t)[:200])
         if t.get("stage") in ("done", "failed"): return t.get("stage") == stage
+    print("WAIT_STAGE_LAST:", last)
     return False
 
 result, failures = {}, []
-def check(name, cond):
+def check(name, cond, detail=""):
     result.setdefault("asserts", {})[name] = bool(cond)
-    if not cond: failures.append(name)
+    if not cond: failures.append(f"{name} {detail}".strip())
 
 DATA_DIR = os.path.join(TEST, "verify")
 day = time.strftime("%Y%m%d")
@@ -186,6 +189,10 @@ try:
     check("R02_notCollideLive003", t_new["id"] != f"MT-{day}-003")
     check("R02_avoidsResidual005", t_new["id"] != f"MT-{day}-005")
     check("R02_noSharedOutputsDir", not os.path.exists(os.path.join(DATA2, "outputs", t_new["id"], "stale-probe")))
+    # 二轮复审 §3.1 场景:删除当天最大编号任务(无任务记录、无 MT 目录残留)后,编号不得复用
+    check("R02_deleteLatestPrepDone", wait_stage(t_new["id"], "done", cookie=cookie))
+    c, _, _h = req(f"/api/tasks/{t_new['id']}", method="DELETE", cookie=cookie)
+    check("R02_deleteLatestOk", c == 200)
 finally:
     srv.terminate(); srv.wait(timeout=10)
     if os.path.exists(SECRET_BAK) and not os.path.exists(SECRET):
@@ -207,8 +214,10 @@ try:
     ok_ids = [i for i in conc_ids if i]
     check("R02_concurrentAllCreated", len(ok_ids) == 6)
     check("R02_concurrentUnique", len(set(ok_ids)) == 6)
+    # 高水位:重启+删除最新编号后,新创建(含并发)仍不复用该编号
     check("R02_uniqueAfterRestart", all(i not in created_ids[:1] and i not in
           (f"MT-{day}-002", f"MT-{day}-003", f"MT-{day}-005") for i in ok_ids))
+    check("R02_deletedLatestNotReused", t_new["id"] not in ok_ids, f"deleted={t_new['id']} new={ok_ids}")
     check("R02_idFormatStable", all(i.startswith(f"MT-{day}-") for i in ok_ids))
     # 清理本段创建的测试任务
     for tid in created_ids:

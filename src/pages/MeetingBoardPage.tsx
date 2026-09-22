@@ -151,8 +151,10 @@ export default function MeetingBoardPage() {
     if (meta?.asrProvider === p || switchingAsr) return;
     setSwitchingAsr(true);
     try {
-      await patchAsrProvider(p);
+      if (!meta) return;
+      const r = await patchAsrProvider(p, meta.settingsVersion ?? 0);
       toast("success", p === "local" ? t("board.asrSwitchedLocal") : t("board.asrSwitchedIflytek"));
+      setMeta((m) => (m ? { ...m, settingsVersion: r.version, asrProvider: (r.asr.provider === "local" ? "local" : "iflytek") } : m));
       fetchMeta().then(setMeta).catch(() => undefined);
     } catch (e) {
       toast("error", (e as Error).message);

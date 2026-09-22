@@ -42,9 +42,10 @@ if not os.path.exists(FFMPEG):
 HOST = "0.0.0.0"
 PORT = 8300
 
-QUEUE_CAPACITY = 8            # R19:排队上限,满则 503
-MAX_UPLOAD_BYTES = 2 * 1024**3   # 与主服务 2GB 上限对齐,超限 413
-TASK_TTL_SEC = 2 * 3600       # R19:done/failed 结果保留 2 小时后清理
+QUEUE_CAPACITY = int(os.environ.get("ASR_QUEUE_CAPACITY", 8))     # R19:排队上限,满则 503
+MAX_UPLOAD_BYTES = int(os.environ.get("ASR_MAX_UPLOAD_BYTES", 2 * 1024**3))   # 与主服务 2GB 上限对齐
+TASK_TTL_SEC = float(os.environ.get("ASR_TASK_TTL_SEC", 2 * 3600))            # R19:done/failed 结果保留时长(可注入便于测试)
+TTL_SWEEP_SEC = float(os.environ.get("ASR_TTL_SWEEP_SEC", 600))               # 过期清理扫描周期(可注入便于测试)
 
 app = FastAPI(title="local-asr")
 TASKS = {}                 # id -> {status, result?, error?, elapsedSec?, finishedAt?}
@@ -157,7 +158,7 @@ def worker():
 def ttl_sweeper():
     """R19:周期清理过期结果与孤儿临时文件(TMP 内超过 TTL 未 touch 的文件兜底删除)"""
     while True:
-        time.sleep(600)
+        time.sleep(TTL_SWEEP_SEC)
         now = time.time()
         for tid in [k for k, v in TASKS.items()
                     if v.get("finishedAt") and now - v["finishedAt"] > TASK_TTL_SEC]:

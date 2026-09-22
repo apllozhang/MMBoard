@@ -103,7 +103,8 @@ function put(conn, local, remote) {
 (async () => {
   const COMMIT = gitCommit();
   const BUILD_TIME = new Date().toISOString();
-  console.log(`[deploy] commit=${COMMIT} builtAt=${BUILD_TIME}`);
+  const DRILL = process.env.DEPLOY_DRILL === "1";   // 二轮复审 §5.2:授权后可执行的回滚演练模式
+  console.log(`[deploy] commit=${COMMIT} builtAt=${BUILD_TIME}${DRILL ? " (DRILL 回滚演练)" : ""}`);
   pack();
 
   const conn = new Client();
@@ -135,9 +136,14 @@ function put(conn, local, remote) {
   if (!imageId.startsWith("sha256:")) { console.error("[deploy] cannot resolve image ID"); conn.end(); process.exit(1); }
   console.log("[deploy] candidate built:", imageId.slice(0, 24));
 
-  // ── 3. 候选容器(临时端口,挂生产数据卷验证真实兼容) ──
+  // ── 3. 候选容器(临时端口)。二轮复审 §5.2:不再挂生产数据卷——复制一份候选专用卷,
+  //      既保留"真实数据兼容性"验证,又杜绝候选进程的中断恢复/状态写入触碰正式数据 ──
   await run(conn, `docker rm -f ${NAME}-cand >/dev/null 2>&1 || true`, true);
-  const runCand = await run(conn, `docker run -d --name ${NAME}-cand -p ${CAND_PORT}:8080 -v ${DATA_VOL}:/app/server/data ${imageId}`);
+  await run(conn, `docker volume rm ${NAME}-cand-data >/dev/null 2>&1 || true`, true);
+  await run(conn, `docker volume create ${NAME}-cand-data >/dev/null`, true);
+  const snap = await run(conn, `docker run --rm -v ${DATA_VOL}:/from -v ${NAME}-cand-data:/to alpine sh -c "cp -a /from/. /to/"`, true);
+  if (snap.code !== 0) { console.error("[deploy] data snapshot FAILED — 旧容器保持不动"); conn.end(); process.exit(1); }
+  const runCand = await run(conn, `docker run -d --name ${NAME}-cand -p ${CAND_PORT}:8080 -v ${NAME}-cand-data:/app/server/data ${imageId}`);
   if (runCand.code !== 0) { console.error("[deploy] candidate start FAILED — 旧容器保持不动"); conn.end(); process.exit(1); }
   await new Promise((r) => setTimeout(r, 4000));
   // R11:两个健康项分别断言 2xx(curl -f,不拼接 includes)
@@ -147,9 +153,10 @@ function put(conn, local, remote) {
   if (h1.code !== 0 || !/^2\d\d$/.test(h1.out.trim()) || h2.code !== 0 || !/^2\d\d$/.test(h2.out.trim()) || !verBody.out.includes(`"commit":"${COMMIT}"`)) {
     console.error(`[deploy] candidate health FAILED (version=${h1.out.trim()} status=${h2.out.trim()}) — 删除候选,旧容器保持不动`);
     await run(conn, `docker rm -f ${NAME}-cand >/dev/null 2>&1 || true`, true);
+    await run(conn, `docker volume rm ${NAME}-cand-data >/dev/null 2>&1 || true`, true);
     conn.end(); process.exit(1);
   }
-  console.log("[deploy] candidate healthy");
+  console.log("[deploy] candidate healthy (isolated data snapshot)");
 
   // ── 4. 切换(记录旧镜像供回滚;切换后正式容器健康失败则回滚) ──
   // 旧容器运行镜像的不可变 ID(回滚依据;不依赖可变标签)
@@ -165,14 +172,30 @@ function put(conn, local, remote) {
   }
   await new Promise((r) => setTimeout(r, 5000));
   const prodHealth = await run(conn, `curl -sf http://127.0.0.1:${PORT}/api/version`, true);
-  if (prodHealth.code !== 0 || !prodHealth.out.includes(`"commit":"${COMMIT}"`)) {
-    console.error("[deploy] prod health/version FAILED — 回滚到旧镜像 ID");
+  // DEPLOY_DRILL=1:故意用不可能匹配的期望 commit 触发健康检查失败,验证真实回滚路径
+  // (授权的演练模式:生产会短暂运行新版本,健康校验失败后自动回滚到 oldImageId)
+  const expectCommit = DRILL ? "drill-expect-mismatch" : COMMIT;
+  if (prodHealth.code !== 0 || !prodHealth.out.includes(`"commit":"${expectCommit}"`)) {
+    console.error(DRILL ? "[deploy][DRILL] 注入健康校验失败 — 执行回滚" : "[deploy] prod health/version FAILED — 回滚到旧镜像 ID");
     await run(conn, `docker rm -f ${NAME} >/dev/null 2>&1 || true`, true);
     await run(conn, `docker run -d --name ${NAME} -p ${PORT}:8080 -v ${DATA_VOL}:/app/server/data --restart unless-stopped ${oldImageId}`, true);
-    conn.end(); process.exit(1);
+    // 回滚后必须实测旧版本恢复(运行期断言,不做源码检查)
+    await new Promise((r) => setTimeout(r, 5000));
+    const rb = await run(conn, `curl -sf http://127.0.0.1:${PORT}/api/version`, true);
+    const rbOk = rb.code === 0 && rb.out.includes('"commit":');
+    const rbCommit = rbOk ? (JSON.parse(rb.out).commit || "?") : "?";
+    if (!DRILL) { conn.end(); process.exit(1); }
+    if (!rbOk || rbCommit === COMMIT) {
+      console.error(`[deploy][DRILL] FAILED — 回滚后版本异常: ${rbCommit}`);
+      conn.end(); process.exit(1);
+    }
+    console.log(`[deploy][DRILL] OK — 回滚已实测:生产恢复至 commit ${rbCommit}(镜像 ${oldImageId.slice(0, 24)}),新版本 ${COMMIT} 未留存`);
+    console.log(`[deploy][DRILL] 生产现运行回滚版本 ${rbCommit};如需部署 ${COMMIT} 请不带 DEPLOY_DRILL 重新执行`);
+    conn.end(); process.exit(0);
   }
   console.log("[deploy] prod healthy, version:", prodHealth.out.trim());
   await run(conn, `docker rm -f ${NAME}-cand >/dev/null 2>&1 || true`, true);
+  await run(conn, `docker volume rm ${NAME}-cand-data >/dev/null 2>&1 || true`, true);
   console.log(`DEPLOY OK → http://${HOST}:${PORT}/ (commit ${COMMIT})`);
   conn.end();
 })().catch((e) => { console.error("DEPLOY FAILED:", e.message); process.exit(1); });
