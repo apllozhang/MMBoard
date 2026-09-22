@@ -47,9 +47,15 @@ function updateTask(taskId, runId, patch) {
   saveTasks(tasks);
 }
 
+/** 本地自然日(YYYY-MM-DD)。R22 复审:额度口径跟随用户时区,不再用 UTC 日期
+ *  (中国时区 UTC+8,UTC 切日比本地晚 8 小时,跨日附近余量提示会算错一天)。 */
+function localDay(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 /** 当日转写用量记账:真实转写成功后按音频时长累加(秒)。mock 不记。 */
 function recordQuota(seconds) {
-  const day = new Date().toISOString().slice(0, 10);
+  const day = localDay();
   let q;
   try { q = readJsonWithRecovery(QUOTA_FILE); } catch { q = {}; }   // 损坏回退 .bak,皆坏按首日
   q[day] = Math.round(((q[day] || 0) + seconds) * 10) / 10;
@@ -151,32 +157,34 @@ function checkRunAlive(taskId, runId) {
   if (!t || t.runId !== runId) throw new RunSupersededError();
 }
 
-/** createTask:storageKey 为 uploads 内唯一存储键;originalName 仅作展示与标题 */
+/** createTask:storageKey 为 uploads 内唯一存储键;originalName 仅作展示与标题。
+ *  R02 复审整改:uuid 为不可复用的产物目录键(task.dirKey),MT-展示编号单调递增不回收——
+ *  删除产生的空号不再被复用,残留目录与并发创建都不会导致编号/目录共享。 */
 function createTask(storageKey, originalName, sizeBytes) {
   const tasks = loadTasks();
   const d = new Date();
   const day = d.toISOString().slice(0, 10).replace(/-/g, "");
-  // 编号唯一化:现存任务与已存在输出目录都占用序号(防删除后复用、防残留目录共享)
-  const used = new Set();
+  let maxSeq = 0;   // 当日已用最大序号(现存任务 + 残留输出目录)
   for (const t of tasks) {
     const m = /^MT-\d{8}-(\d+)$/.exec(t.id || "");
-    if (m && t.id.startsWith(`MT-${day}`)) used.add(parseInt(m[1], 10));
+    if (m && t.id.startsWith(`MT-${day}`)) maxSeq = Math.max(maxSeq, parseInt(m[1], 10));
   }
   try {
     for (const dir of fs.readdirSync(OUTPUTS)) {
       const m = /^MT-\d{8}-(\d+)$/.exec(dir);
-      if (m && dir.startsWith(`MT-${day}`)) used.add(parseInt(m[1], 10));
+      if (m && dir.startsWith(`MT-${day}`)) maxSeq = Math.max(maxSeq, parseInt(m[1], 10));
     }
   } catch { /* outputs 不存在时忽略 */ }
-  let seq = 1;
-  while (used.has(seq)) seq += 1;
+  const seq = maxSeq + 1;
+  const uuid = randomUUID();
   const task = {
-    id: `MT-${day}-${String(seq).padStart(3, "0")}`,
-    uuid: randomUUID(),                       // 内部主键(展示与 API 沿用 id)
-    runId: randomUUID(),                      // 当前运行实例(重跑/互斥判定)
+    id: `MT-${day}-${String(seq).padStart(3, "0")}`,   // 展示编号(单调分配,不复用)
+    uuid,                                              // 内部主键
+    dirKey: uuid,                                      // 产物目录键(不可复用;旧任务无此字段时回退 id)
+    runId: randomUUID(),                               // 当前运行实例(重跑/互斥判定)
     title: originalName.replace(/\.[^.]+$/, ""),
-    originalFileName: originalName,           // 用户看到的原始文件名
-    fileName: storageKey,                     // uploads 存储键(与原始名解耦,同名上传互不影响)
+    originalFileName: originalName,                    // 用户看到的原始文件名
+    fileName: storageKey,                              // uploads 存储键(与原始名解耦,同名上传互不影响)
     sizeBytes,
     stage: "queued",
     steps: [
@@ -195,6 +203,11 @@ function createTask(storageKey, originalName, sizeBytes) {
   tasks.unshift(task);
   saveTasks(tasks);
   return task;
+}
+
+/** 产物目录:新任务用不可复用的 dirKey(uuid);存量旧任务回退展示编号 id(向后兼容) */
+function taskDir(task) {
+  return path.join(OUTPUTS, task.dirKey || task.id);
 }
 
 /** 异步执行流水线(不阻塞 HTTP)。opts.transcript 存在时复用已存转写文本,跳过 extract/transcribe(不耗讯飞额度)。
@@ -281,7 +294,7 @@ async function runFromExtract(task, secret, log) {
 
     /* 转写落盘:后续"重跑分析"可复用,不必重新转写(省讯飞额度) */
     try {
-      const outDir = path.join(OUTPUTS, task.id);
+      const outDir = taskDir(task);
       fs.mkdirSync(outDir, { recursive: true });
       fs.writeFileSync(path.join(outDir, "transcript.json"),
         JSON.stringify({ text, segments: segments || [], hasSpeakers: !!hasSpeakers }, null, 2));
@@ -323,7 +336,7 @@ async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers
     /* ── render ── */
     updateTask(task.id, task.runId, { stage: "rendering" });
     setStep(task.id, task.runId, "render", "running");
-    const outDir = path.join(OUTPUTS, task.id);
+    const outDir = taskDir(task);
     fs.mkdirSync(outDir, { recursive: true });
     const { html, fileName } = renderMinutes({
       analysis,
@@ -343,7 +356,7 @@ async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers
               uploadedAt: task.createdAt },
     }, null, 2));
     setStep(task.id, task.runId, "render", "done", fileName);
-    updateTask(task.id, task.runId, { stage: "done", title: analysis.title || task.title, minutesFile: `${task.id}/${fileName}` });
+    updateTask(task.id, task.runId, { stage: "done", title: analysis.title || task.title, minutesFile: `${task.dirKey || task.id}/${fileName}` });
     log("流水线完成 →", fileName);
   } catch (e) {
     if (e instanceof RunSupersededError) { log("运行实例已被取代,本次执行退出"); return; }
@@ -370,4 +383,4 @@ function failTask(task, e) {
   saveTasks(tasks);
 }
 
-module.exports = { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT };
+module.exports = { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT };

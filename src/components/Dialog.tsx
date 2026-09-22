@@ -14,24 +14,30 @@ interface DialogProps {
   footer?: React.ReactNode;
   /** 宽版(设置类弹层) */
   wide?: boolean;
+  /** R23:多层弹窗时把本层降级(inert + aria-hidden),辅助技术只感知顶层弹窗 */
+  suspended?: boolean;
 }
 
-export function Dialog({ open, onClose, title, children, footer, wide }: DialogProps) {
-  const overlayRef = useRef<HTMLDivElement>(null);
+export function Dialog({ open, onClose, title, children, footer, wide, suspended }: DialogProps) {
+  const overlayRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
+  const suspendedRef = useRef(!!suspended);
   useEffect(() => { onCloseRef.current = onClose; });   // 始终拿到最新回调,但不触发焦点重置
+  useEffect(() => { suspendedRef.current = !!suspended; }, [suspended]);
 
   useEffect(() => {
     if (!open) return;
-    triggerRef.current = document.activeElement as HTMLElement;
     const overlay = overlayRef.current;
     if (!overlay) return;
-    overlay.querySelector<HTMLElement>("button,[href],input,select,textarea")?.focus();
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    if (!suspendedRef.current) {
+      triggerRef.current = document.activeElement as HTMLElement;   // 仅顶层记录/归还触发焦点
+      overlay.querySelector<HTMLElement>("button,[href],input,select,textarea")?.focus();
+      document.body.style.overflow = "hidden";
+    }
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (suspendedRef.current) return;   // R23:被顶层弹窗覆盖时不响应 Esc/Tab(顶层统一处理)
       if (e.key === "Escape") { onCloseRef.current(); return; }
       if (e.key !== "Tab") return;
       const list = Array.from(overlay.querySelectorAll<HTMLElement>("button,[href],input,select,textarea"))
@@ -45,14 +51,25 @@ export function Dialog({ open, onClose, title, children, footer, wide }: DialogP
     overlay.addEventListener("keydown", onKeyDown);
     return () => {
       overlay.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = prevOverflow;
-      triggerRef.current?.focus();
+      if (!suspendedRef.current) {
+        document.body.style.overflow = "";
+        triggerRef.current?.focus();
+      }
     };
   }, [open]);
 
   if (!open) return null;
   return (
-    <div ref={overlayRef} className="fixed inset-0 z-[500] grid place-items-center p-4"
+    <div ref={(el) => {
+      overlayRef.current = el;
+      // R23:suspended(被顶层弹窗覆盖)时对本层设置 inert/aria-hidden——
+      // 键盘与读屏用户不会进入本层,Tab 焦点圈闭只作用于顶层。
+      if (el) {
+        (el as HTMLElement & { inert?: boolean }).inert = !!suspended;
+        if (suspended) el.setAttribute("aria-hidden", "true");
+        else el.removeAttribute("aria-hidden");
+      }
+    }} className="fixed inset-0 z-[500] grid place-items-center p-4"
          style={{ background: "rgb(20 14 32 / 50%)" }}
          role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : undefined}
          onMouseDown={(e) => { if (e.target === overlayRef.current) onCloseRef.current(); }}>

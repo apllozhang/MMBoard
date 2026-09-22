@@ -95,6 +95,15 @@ await section("B persist:原子写、损坏恢复、隔离与双坏抛错", asyn
   let enoent = "";
   try { persist.readJsonWithRecovery(f3); } catch (e) { enoent = e.code || ""; }
   ok("文件不存在 → 抛 ENOENT 由调用方初始化", enoent === "ENOENT");
+
+  // R09 复审补充:并发读写下原子写不因 Windows 瞬态文件锁(EPERM)失败
+  const f4 = path.join(d, "hot.json");
+  persist.writeJsonAtomic(f4, { i: 0 });
+  const reader = setInterval(() => { try { fs.readFileSync(f4, "utf8"); } catch { /* 读窗口 */ } }, 1);
+  let writeErr = "";
+  try { for (let i = 1; i <= 200; i++) persist.writeJsonAtomic(f4, { i }); } catch (e) { writeErr = e.message; }
+  clearInterval(reader);
+  ok("并发读写下 200 次原子写全部成功", writeErr === "" && JSON.parse(fs.readFileSync(f4, "utf8")).i === 200, writeErr);
 });
 
 await section("A3 讯飞字段契约:appId+apiSecret 两件套,secretKey 别名", async () => {
@@ -269,6 +278,43 @@ await section("集成:speaker 标注运行互斥 + settings/test 限流", async 
   for (let i = 0; i < 6; i++) await api("POST", "/api/settings/test", {});   // 400(配置不完整),但消耗限流配额
   const r429 = await api("POST", "/api/settings/test", {});
   ok("settings/test 限流生效(第 7 次 429)", r429.status === 429);
+});
+
+await section("R22 settings 并发编辑保护(version/409)与额度本地时区", async () => {
+  persist.writeJsonAtomic(path.join(DATA, "settings.json"),
+    { activeId: null, models: [], iflytek: { appId: "v-app", apiSecret: "v-secret" } });
+  const g1 = await (await api("GET", "/api/settings")).json();
+  ok("GET settings 返回 version", Number.isFinite(g1.version));
+
+  const stale = await api("PUT", "/api/settings", { version: g1.version + 5, activeId: null, models: [] });
+  ok("旧 version 保存 → 409(拒绝覆盖他人修改)", stale.status === 409, `实际 ${stale.status}`);
+
+  const good = await api("PUT", "/api/settings", { version: g1.version, activeId: null, models: [] });
+  ok("匹配 version 保存成功且 version 递增", good.status === 200 && (await good.json()).version === g1.version + 1,
+     `实际 ${good.status}`);
+
+  const { localDay } = require(path.join(ROOT, "server", "pipeline.cjs"));
+  const now = new Date();
+  const expect = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  ok("额度口径 = 本地自然日(localDay)", localDay() === expect, `${localDay()} vs ${expect}`);
+});
+
+await section("R02 编号不回收与 uuid 目录键(单元级)", async () => {
+  const pipeline = require(path.join(ROOT, "server", "pipeline.cjs"));
+  const a = pipeline.createTask("unit-a.wav", "a.wav", 1);
+  const b = pipeline.createTask("unit-b.wav", "b.wav", 1);
+  ok("连续创建编号单调递增", b.id > a.id);
+  ok("新任务携带 uuid 目录键(dirKey ≠ 展示编号)", a.dirKey && a.dirKey !== a.id && a.dirKey === a.uuid);
+  // 残留目录占号:手工造一个超大序号残留目录,新编号必须避开
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const ghost = path.join(pipeline.OUTPUTS, `MT-${day}-900`);
+  fs.mkdirSync(ghost, { recursive: true });
+  const c = pipeline.createTask("unit-c.wav", "c.wav", 1);
+  ok("残留输出目录占号(新编号 > 900)", parseInt(c.id.split("-").pop(), 10) > 900, c.id);
+  fs.rmSync(ghost, { recursive: true, force: true });
+  // 清理本段任务记录
+  const tasks = pipeline.loadTasks().filter((t) => t.id !== a.id && t.id !== b.id && t.id !== c.id);
+  pipeline.saveTasks(tasks);
 });
 
 await section("集成:队列满防线(单元级)与 restart 前置检查顺序", async () => {

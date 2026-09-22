@@ -88,9 +88,11 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
   const persist = async (next: { activeId: string | null; models: ModelEntry[]; asr?: AsrConfig; iflytek?: IflytekConfig }, okMsg?: string) => {
     setBusy(true);
     try {
-      const r = await saveSettings(next);
-      setPayload((p) => (p ? { ...p, activeId: r.activeId, models: next.models, asr: next.asr ?? p.asr, iflytek: (r as { iflytek?: IflytekConfig }).iflytek ?? p.iflytek } : p));
+      // R22:回传当前 version,另一窗口已保存过时服务端返回 409(避免整份覆盖)
+      const r = await saveSettings({ version: payload?.version, ...next });
+      setPayload((p) => (p ? { ...p, version: r.version, activeId: r.activeId, models: next.models, asr: next.asr ?? p.asr, iflytek: (r as { iflytek?: IflytekConfig }).iflytek ?? p.iflytek } : p));
       if (okMsg) toast("success", okMsg);
+      window.dispatchEvent(new CustomEvent("mmb-settings-changed"));   // R21:通知看板立即刷新通道状态 meta
       return true;
     } catch (e) {
       toast("error", (e as Error).message);
@@ -149,6 +151,9 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
         const r = await testDraftModel({ provider: draft.provider, baseUrl: draft.baseUrl, model: draft.model, apiKey: draft.apiKey });
         toast(r.ok ? "success" : "error", r.ok ? `${t("settings.testOk")} · ${r.ms}ms` : `${t("settings.testFail")} · ${r.message || ""}`);
       }
+    } catch (e) {
+      // R21 复审:网络异常等未捕获拒绝会形成未处理 Promise 且无提示——明确报错
+      toast("error", (e as Error).message || "测试请求失败");
     } finally {
       setTestingId(null);
     }

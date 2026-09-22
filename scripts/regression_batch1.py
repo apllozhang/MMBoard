@@ -4,7 +4,7 @@
 覆盖: R01 同名上传隔离 / R02 编号唯一性(回收制)/ R07 运行互斥 / R03 匿名与CSRF / 历史格式兼容。
 隔离: MMB_DATA_DIR 指向临时目录; MMB_DEMO=1 显式演示模式(mock 转写); 不触碰任何真实数据。
 """
-import json, os, shutil, socket, subprocess, sys, time, urllib.request, urllib.error, uuid, wave, math, struct, io
+import json, os, shutil, socket, subprocess, sys, time, urllib.request, urllib.error, uuid, wave, math, struct, io, threading
 
 PORT = sys.argv[1] if len(sys.argv) > 1 else "8793"
 BASE = f"http://127.0.0.1:{PORT}"
@@ -143,6 +143,10 @@ try:
     check("R01_task2Survives", os.path.exists(f2) and os.path.getsize(f2) > 0)
     c, t2b, _ = req(f"/api/tasks/{t2['id']}", cookie=cookie)
     check("R01_task2Rerun", t2b.get("stage") == "done")
+    # R02 复审:uuid 为产物目录键——dirKey 存在且 transcript 落在其目录;被删任务的目录已清理
+    check("R02_dirKeyIsUuid", isinstance(t2b.get("dirKey"), str) and len(t2b["dirKey"]) >= 32 and t2b["dirKey"] != t2b["id"])
+    check("R02_transcriptInUuidDir", os.path.exists(os.path.join(DATA_DIR, "outputs", t2b["dirKey"], "transcript.json")))
+    check("R02_deletedTaskDirCleaned", not os.path.exists(os.path.join(DATA_DIR, "outputs", t1.get("dirKey") or t1["id"])))
 
     # ── R07(运行中互斥,真实时序) ──
     c, _, _h = req(f"/api/tasks/{t2['id']}/restart", method="POST", body={"scope": "all"}, cookie=cookie)
@@ -159,7 +163,7 @@ finally:
     if os.path.exists(SECRET_BAK) and not os.path.exists(SECRET):
         os.rename(SECRET_BAK, SECRET)
 
-# ── R02:编号唯一性 ──
+# ── R02:编号唯一性(复审整改口径:编号单调不回收 + uuid 目录键 + 并发/重启不重复) ──
 if os.path.exists(SECRET):
     os.rename(SECRET, SECRET_BAK)
 DATA2 = os.path.join(TEST, "verify2")
@@ -169,20 +173,46 @@ json.dump([{"id": f"MT-{day}-{i:03d}", "title": f"t{i}", "fileName": f"f{i}.wav"
             "stage": "done", "steps": [], "transcriptChars": 1, "minutesFile": "", "error": "",
             "createdAt": "x", "updatedAt": "x"} for i in (1, 2, 3)],
            open(os.path.join(DATA2, "tasks.json"), "w", encoding="utf-8"))
+created_ids = []
 srv = start_server(DATA2)
 try:
     cookie = login()
     c, _, _h = req(f"/api/tasks/MT-{day}-002", method="DELETE", cookie=cookie)
+    check("R02_deleteMiddleOk", c == 200)
     c, t_new = upload("new.wav", make_wav(), cookie)
-    # 口径(与实现一致):回收制——已彻底删除的 002 可回收;现存 003 与残留 005 绝不复用
+    created_ids.append(t_new.get("id"))
+    # 不回收口径:被删除的 002 不复用;现存 003 与残留目录 005 同样避开
+    check("R02_notReuseDeleted002", t_new["id"] != f"MT-{day}-002")
     check("R02_notCollideLive003", t_new["id"] != f"MT-{day}-003")
     check("R02_avoidsResidual005", t_new["id"] != f"MT-{day}-005")
     check("R02_noSharedOutputsDir", not os.path.exists(os.path.join(DATA2, "outputs", t_new["id"], "stale-probe")))
-    req(f"/api/tasks/{t_new['id']}", method="DELETE", cookie=cookie)
-    c, t_new2 = upload("new2.wav", make_wav(), cookie)
-    check("R02_uniqueAcrossCreates", t_new2["id"] != t_new["id"] and t_new2["id"] != f"MT-{day}-005")
-    # 历史兼容
-    json.dump([make_task(day, 9, stage="done")], open(os.path.join(DATA2, "tasks.json"), "w", encoding="utf-8"))
+finally:
+    srv.terminate(); srv.wait(timeout=10)
+    if os.path.exists(SECRET_BAK) and not os.path.exists(SECRET):
+        os.rename(SECRET_BAK, SECRET)
+# 重启后并发创建(进程重启同时清空上传限流窗口;6 恰为限流上限):
+# R02 复审 —— 并发创建编号两两不同,且重启后仍不与既有任务/残留冲突
+srv = start_server(DATA2)
+try:
+    cookie = login()
+    conc_ids, conc_lock = [], threading.Lock()
+    def _conc_upload():
+        st_c, j_c = upload("conc.wav", make_wav(1), cookie)
+        with conc_lock:
+            conc_ids.append(j_c.get("id") if st_c == 201 else None)
+    threads = [threading.Thread(target=_conc_upload) for _ in range(6)]
+    for th in threads: th.start()
+    for th in threads: th.join()
+    created_ids += [i for i in conc_ids if i]
+    ok_ids = [i for i in conc_ids if i]
+    check("R02_concurrentAllCreated", len(ok_ids) == 6)
+    check("R02_concurrentUnique", len(set(ok_ids)) == 6)
+    check("R02_uniqueAfterRestart", all(i not in created_ids[:1] and i not in
+          (f"MT-{day}-002", f"MT-{day}-003", f"MT-{day}-005") for i in ok_ids))
+    check("R02_idFormatStable", all(i.startswith(f"MT-{day}-") for i in ok_ids))
+    # 清理本段创建的测试任务
+    for tid in created_ids:
+        if tid: req(f"/api/tasks/{tid}", method="DELETE", cookie=cookie)
 finally:
     srv.terminate(); srv.wait(timeout=10)
     if os.path.exists(SECRET_BAK) and not os.path.exists(SECRET):

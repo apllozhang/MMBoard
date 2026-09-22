@@ -27,12 +27,19 @@ export interface IflytekConfig {
 }
 
 export interface SettingsPayload {
+  /** R22:并发编辑保护版本号——保存时原样回传,服务端不匹配返回 409 */
+  version: number;
   activeId: string | null;
   models: ModelEntry[];
   asr: AsrConfig;
   iflytek: IflytekConfig;
   /** models 为空时,实际生效的是密钥文件里的配置(兼容既有部署) */
   fallback: { provider: string; baseUrl: string; model: string; apiKey: string } | null;
+}
+
+/** 设置保存/测试的业务错误(服务端 4xx/409 的 message 用于界面提示) */
+export class SettingsError extends Error {
+  constructor(message: string, public status?: number) { super(message); }
 }
 
 export interface TestResult {
@@ -50,14 +57,19 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
     window.location.reload();
     throw new Error("unauthenticated");
   }
-  if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+  if (!res.ok) {
+    // R21:把服务端业务错误(400 参数问题 / 409 并发冲突)的明确信息带给界面,而非笼统 HTTP 码
+    let message = `${url} → HTTP ${res.status}`;
+    try { message = (await res.json())?.error || message; } catch { /* 非 JSON 响应保持默认 */ }
+    throw new SettingsError(message, res.status);
+  }
   return res.json() as Promise<T>;
 }
 
 export const fetchSettings = () => jsonFetch<SettingsPayload>("/api/settings");
 
-export const saveSettings = (p: { activeId: string | null; models: ModelEntry[]; asr?: AsrConfig; iflytek?: IflytekConfig }) =>
-  jsonFetch<{ ok: boolean; activeId: string; count: number }>("/api/settings", {
+export const saveSettings = (p: { version?: number; activeId: string | null; models: ModelEntry[]; asr?: AsrConfig; iflytek?: IflytekConfig }) =>
+  jsonFetch<{ ok: boolean; version: number; activeId: string; count: number }>("/api/settings", {
     method: "PUT",
     body: JSON.stringify(p),
   });

@@ -20,3 +20,6 @@ preview.log
 test-*.wav
 test-*.mp4
 *.tgz
+
+# Python 缓存
+__pycache__/

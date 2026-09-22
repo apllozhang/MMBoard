@@ -72,10 +72,16 @@ export default function MeetingBoardPage() {
   }, []);
 
   useEffect(() => {
-    fetchMeta().then(setMeta).catch(() => setMeta(null));
+    const refreshMeta = () => fetchMeta().then(setMeta).catch(() => setMeta(null));
+    refreshMeta();
     load();
     pollRef.current = window.setInterval(load, 10_000);   // 流水线进行中看板 10s 轮询
-    return () => { if (pollRef.current) window.clearInterval(pollRef.current); };
+    // R21:设置页保存(asr/讯飞参数/模型)后立即刷新通道状态,不等下一轮轮询
+    window.addEventListener("mmb-settings-changed", refreshMeta);
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      window.removeEventListener("mmb-settings-changed", refreshMeta);
+    };
   }, [load]);
 
   const onUpload = async (file: File) => {
@@ -430,8 +436,9 @@ export default function MeetingBoardPage() {
         )}
       </Dialog>
 
-      {/* 流水线时间线弹层(D1-D5 由 Dialog 组件统一实现) */}
+      {/* 流水线时间线弹层(D1-D5 由 Dialog 组件统一实现);R23:重跑确认弹层打开时本层 suspended */}
       <Dialog open={detail !== null} onClose={() => setDetailId(null)}
+              suspended={rerunPreview !== null || rerunError !== ""}
               title={`${t("board.detailTitle")} · ${detail?.id ?? ""}`}
               footer={
                 <>

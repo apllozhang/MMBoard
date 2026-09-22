@@ -13,7 +13,7 @@ const path = require("path");
 const { randomUUID } = require("crypto");
 const auth = require("./auth.cjs");
 const { renderMinutes } = require("./minutes-template.cjs");
-const { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY,
+const { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay,
         DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
 const { hasKeys } = require("./iflytek.cjs");
 const { writeJsonAtomic, readJsonWithRecovery } = require("./persist.cjs");
@@ -31,7 +31,7 @@ function dailyAsrQuota() {
 function decorateTask(t) {
   return {
     ...t,
-    hasTranscript: fs.existsSync(path.join(OUTPUTS, t.id, "transcript.json")),
+    hasTranscript: fs.existsSync(path.join(taskDir(t), "transcript.json")),
     hasSource: !!t.fileName && fs.existsSync(path.join(UPLOADS, t.fileName)),
   };
 }
@@ -300,6 +300,7 @@ app.get("/api/settings", (_req, res) => {
     try { const s = JSON.parse(fs.readFileSync(SECRET_FILE, "utf8")); return s.llm || null; } catch { return null; }
   })();
   res.json({
+    version: st.version || 0,   // R22:并发编辑保护——保存时回传,不匹配则 409
     activeId: st.activeId || null,
     models: (st.models || []).map((m) => ({ ...m, apiKey: maskKey(m.apiKey) })),
     // 转写通道(iflytek | local)
@@ -318,6 +319,10 @@ app.get("/api/settings", (_req, res) => {
 app.put("/api/settings", (req, res) => {
   const body = req.body || {};
   const prev = loadSettings();
+  // R22:并发编辑保护——客户端回传 GET 时拿到的 version,与当前不一致说明另一窗口已保存过,拒绝覆盖
+  if (body.version !== undefined && Number(body.version) !== Number(prev.version || 0)) {
+    return res.status(409).json({ error: "设置已被其他窗口修改并保存,为避免覆盖已取消本次保存;请刷新页面获取最新设置后重试" });
+  }
   const prevById = new Map((prev.models || []).map((m) => [m.id, m]));
   for (const m of (Array.isArray(body.models) ? body.models : [])) {
     const old = prevById.get(m.id);
@@ -361,10 +366,10 @@ app.put("/api/settings", (req, res) => {
   if (iflytek.appId && !iflytek.apiSecret) {
     return res.status(400).json({ error: "讯飞参数需填写 appId 与 apiSecret(apiKey 可选)" });
   }
-  // R22:已知字段更新,保留 settings 里其他字段(如 asrDailyQuotaSeconds)
-  saveSettings({ ...prev, activeId, models, asr, iflytek });
+  // R22:已知字段更新,保留 settings 里其他字段(如 asrDailyQuotaSeconds);version 递增供并发校验
+  saveSettings({ ...prev, version: (Number(prev.version) || 0) + 1, activeId, models, asr, iflytek });
   audit(req, "settings.save", `models=${models.length} asr=${asr.provider} iflytek=${iflytek.appId ? "set" : "empty"}`);
-  res.json({ ok: true, activeId, count: models.length, asr, iflytek: { appId: iflytek.appId, apiKey: maskKey(iflytek.apiKey), apiSecret: maskKey(iflytek.apiSecret) } });
+  res.json({ ok: true, version: Number(prev.version || 0) + 1, activeId, count: models.length, asr, iflytek: { appId: iflytek.appId, apiKey: maskKey(iflytek.apiKey), apiSecret: maskKey(iflytek.apiSecret) } });
 });
 
 app.post("/api/settings/test", async (req, res) => {
@@ -519,7 +524,7 @@ app.get("/api/tasks/:id/rerun-preview", async (req, res) => {
     if (!audioSeconds) return res.status(409).json({ error: "无法探测音频时长(源文件缺失或损坏)" });
   }
   const provider = loadSecret().asr?.provider === "local" ? "local" : "iflytek";
-  const day = new Date().toISOString().slice(0, 10);
+  const day = localDay();   // R22:额度口径 = 本地自然日
   const dailySeconds = dailyAsrQuota();
   const usedSeconds = readQuota(day);
   const freeSeconds = Math.max(0, Math.round((dailySeconds - usedSeconds) * 10) / 10);
@@ -555,7 +560,7 @@ app.post("/api/tasks/:id/restart", (req, res) => {
 
   let transcript = null;
   if (scope === "analyze") {
-    const tp = path.join(OUTPUTS, t.id, "transcript.json");
+    const tp = path.join(taskDir(t), "transcript.json");
     if (!fs.existsSync(tp)) {
       return res.status(400).json({ error: "该任务没有已保存的转写文本,请用「整条重跑」" });
     }
@@ -619,7 +624,7 @@ function rebuildTalkStats(segments, hasSpeakers, map = {}) {
 app.get("/api/tasks/:id/speakers", (req, res) => {
   const t = loadTasks().find((x) => x.id === req.params.id);
   if (!t) return res.status(404).json({ error: "task not found" });
-  const tp = path.join(OUTPUTS, t.id, "transcript.json");
+  const tp = path.join(taskDir(t), "transcript.json");
   if (!fs.existsSync(tp)) return res.status(404).json({ error: "该任务没有已保存的转写文本" });
   let tr;
   try { tr = JSON.parse(fs.readFileSync(tp, "utf8")); }
@@ -628,7 +633,7 @@ app.get("/api/tasks/:id/speakers", (req, res) => {
   res.json({
     speakers,
     map: (tr.speakerMap || t.speakerMap || {}),
-    hasAnalysis: fs.existsSync(path.join(OUTPUTS, t.id, "analysis.json")),
+    hasAnalysis: fs.existsSync(path.join(taskDir(t), "analysis.json")),
   });
 });
 
@@ -645,7 +650,7 @@ app.put("/api/tasks/:id/speakers", (req, res) => {
       map[String(k)] = v.trim().slice(0, 30);   // 姓名限 30 字符
     }
   }
-  const tp = path.join(OUTPUTS, t.id, "transcript.json");
+  const tp = path.join(taskDir(t), "transcript.json");
   if (!fs.existsSync(tp)) return res.status(404).json({ error: "该任务没有已保存的转写文本" });
   let tr;
   try { tr = JSON.parse(fs.readFileSync(tp, "utf8")); }
@@ -659,7 +664,7 @@ app.put("/api/tasks/:id/speakers", (req, res) => {
   audit(req, "task.speakers", `${t.id} ${JSON.stringify(map)}`);
 
   // 纯重渲染:有 analysis.json 才能只重渲染(否则提示先重跑分析)
-  const ap = path.join(OUTPUTS, t.id, "analysis.json");
+  const ap = path.join(taskDir(t), "analysis.json");
   if (!fs.existsSync(ap)) {
     return res.json({ ok: true, map, rerendered: false,
       message: "已保存标注;该任务暂无可复用的分析结果,请点「重新跑分析」生成后再标注生效" });
@@ -671,14 +676,14 @@ app.put("/api/tasks/:id/speakers", (req, res) => {
     analysis: analysis2,
     meta: { ...saved.meta, talkStats },
   });
-  fs.writeFileSync(path.join(OUTPUTS, t.id, fileName), html, "utf8");
+  fs.writeFileSync(path.join(taskDir(t), fileName), html, "utf8");
   if (!t.minutesFile) {
-    t.minutesFile = `${t.id}/${fileName}`;
+    t.minutesFile = `${t.dirKey || t.id}/${fileName}`;
     const tasks2 = loadTasks();
     const t3 = tasks2.find((x) => x.id === t.id);
-    if (t3 && !t3.minutesFile) { t3.minutesFile = t.minutesFile; t3.updatedAt = new Date().toISOString(); fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks2, null, 2)); }
+    if (t3 && !t3.minutesFile) { t3.minutesFile = t.minutesFile; t3.updatedAt = new Date().toISOString(); saveTasks(tasks2); }
   }
-  res.json({ ok: true, map, rerendered: true, minutesFile: `${t.id}/${fileName}` });
+  res.json({ ok: true, map, rerendered: true, minutesFile: `${t.dirKey || t.id}/${fileName}` });
 });
 
 /* ── 纪要下载(Attachment,文件名用会议标题) ── */
@@ -709,7 +714,7 @@ app.delete("/api/tasks/:id", (req, res) => {
   saveTasks(tasks);
   const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best effort */ } };
   if (t.minutesFile) rm(path.join(OUTPUTS, t.minutesFile.split("/")[0]));
-  else rm(path.join(OUTPUTS, t.id));   // 无纪要也清产物目录(transcript.json 等)
+  else rm(taskDir(t));   // 无纪要也清产物目录(transcript.json 等)
   if (t.fileName) rm(path.join(UPLOADS, t.fileName));
   // 转码中间文件:新任务为 <uuid>.mp3,历史任务为 <task.id>.mp3,两种都清(仅限本任务拥有的键)
   if (t.uuid) rm(path.join(UPLOADS, `${t.uuid}.mp3`));

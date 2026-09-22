@@ -5,12 +5,28 @@
 "use strict";
 const fs = require("fs");
 
+/** 同步睡眠(Atomics.wait;仅用于 rename 瞬态锁重试的短等待) */
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* 超时即返回 */ }
+}
+
+/** Windows 下 rename 目标若恰被并发读句柄打开会报 EPERM/EACCES(瞬态)——短暂等待后重试 */
+function renameWithRetry(tmp, file, attempts = 6) {
+  for (let i = 0; ; i++) {
+    try { fs.renameSync(tmp, file); return; }
+    catch (e) {
+      if ((e.code === "EPERM" || e.code === "EACCES") && i < attempts - 1) { sleepSync(15 * (i + 1)); continue; }
+      throw e;
+    }
+  }
+}
+
 /** 原子写:临时文件 + rename;写前保留一份 .bak */
 function writeJsonAtomic(file, obj) {
   const tmp = file + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
   try { if (fs.existsSync(file)) fs.copyFileSync(file, file + ".bak"); } catch { /* best effort */ }
-  fs.renameSync(tmp, file);
+  renameWithRetry(tmp, file);
 }
 
 function isNotFound(e) { return e && e.code === "ENOENT"; }
