@@ -12,9 +12,13 @@ const http = require("http");
 const net = require("net");
 const dns = require("dns").promises;
 
-/* ── R05:LLM 地址白名单——协议/解析目的校验,默认拒绝私网与保留地址 ──
- * 内网部署的本地模型(vLLM/Ollama)需在 settings.json 显式 "allowPrivateLlmHosts": true;
- * 云元数据地址(169.254.169.254)无条件拒绝。原生 https.request 不跟随重定向,无跳转绕过。 */
+/* ── R05(三轮复审 §7-2):LLM 地址精确白名单 + IP 直连,关闭 DNS rebinding 窗口 ──
+ * · settings.allowedLlmHosts:精确主机/端口列表(如 ["127.0.0.1:11434","10.0.0.5"]),
+ *   列表命中者放行私网;旧配置 allowPrivateLlmHosts: true 仍兼容(全放行,已弃用)。
+ * · 云元数据地址(169.254.169.254 / *metadata*)无条件拒绝。
+ * · resolveLlmTarget 解析 DNS 后返回绑定 IP 的连接地址与原始 Host——连接只发往校验过的 IP,
+ *   不存在"校验一次解析、连接再解析"的 rebinding 时间窗;https 保留 servername 做 SNI 证书校验。
+ * · 原生 https.request 不跟随重定向,无跳转绕过。 */
 function isPrivateIp(ip) {
   const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
   if (net.isIPv4(v4)) {
@@ -29,11 +33,24 @@ function isPrivateIp(ip) {
   return false;
 }
 
-async function assertLlmUrl(urlStr, { allowPrivate = false } = {}) {
+/** 精确主机/端口匹配:条目形如 "host"、"host:port"、"10.0.0.5:11434";hostname 匹配或 host:port 精确匹配 */
+function hostAllowed(hostname, port, allowedHosts = []) {
+  return allowedHosts.some((entry) => {
+    const e = String(entry || "").trim().toLowerCase();
+    if (!e) return false;
+    if (e.includes(":")) return e === `${hostname.toLowerCase()}:${port}`;
+    return e === hostname.toLowerCase();
+  });
+}
+
+/** 解析并校验 LLM 地址,返回 { connectBaseUrl, originalHost }——connectBaseUrl 的 host 为校验过的 IP */
+async function resolveLlmTarget(urlStr, { allowPrivate = false, allowedHosts = [] } = {}) {
   let u;
   try { u = new URL(String(urlStr)); } catch { throw new Error("LLM 地址格式无效"); }
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("LLM 地址仅允许 http/https 协议");
   if (/metadata/i.test(u.hostname)) throw new Error("LLM 地址指向云元数据端点,无条件拒绝");
+  const port = u.port || (u.protocol === "https:" ? "443" : "80");
+  const explicitlyAllowed = hostAllowed(u.hostname, port, allowedHosts);
   let addrs;
   if (net.isIP(u.hostname)) addrs = [u.hostname];
   else {
@@ -43,14 +60,26 @@ async function assertLlmUrl(urlStr, { allowPrivate = false } = {}) {
   if (addrs.some((ip) => ip === "169.254.169.254")) {
     throw new Error("LLM 地址指向云元数据端点,无条件拒绝");
   }
-  if (!allowPrivate && addrs.some(isPrivateIp)) {
-    throw new Error("LLM 地址解析到内网/保留地址,已拒绝;如确需内网模型服务,请在 settings.json 配置 allowPrivateLlmHosts: true");
+  const hasPrivate = addrs.some(isPrivateIp);
+  if (hasPrivate && !explicitlyAllowed && !allowPrivate) {
+    throw new Error("LLM 地址解析到内网/保留地址,已拒绝;如确需内网模型服务,请在 settings.json 的 allowedLlmHosts 列表中加入该主机(如 \"127.0.0.1:11434\")");
   }
+  // IP 直连:连接只发往校验过的地址,消除 rebinding 窗口;Host 头与 https servername 保留原主机
+  const ipLiteral = addrs[0].includes(":") ? `[${addrs[0]}]` : addrs[0];
+  const connectBaseUrl = `${u.protocol}//${ipLiteral}${u.port ? `:${u.port}` : ""}`;
+  return { connectBaseUrl, originalHost: u.host, hostname: u.hostname, resolvedIp: addrs[0], explicitlyAllowed };
+}
+
+/** 兼容旧调用名:仅做校验(不返回绑定地址) */
+async function assertLlmUrl(urlStr, opts = {}) {
+  await resolveLlmTarget(urlStr, opts);
   return true;
 }
 
-/** POST JSON,空闲超时默认 20 分钟,返回 {status, text} */
-function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000) {
+/** POST JSON,空闲超时默认 20 分钟,返回 {status, text}。
+ *  opts.connectIp:DNS 校验后的直连 IP(R05 关闭 rebinding);opts.serverName:https SNI/证书校验主机名;
+ *  opts.hostHeader:覆盖 Host 头。连接只发往校验过的 IP。 */
+function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000, opts = {}) {
   // R17:空闲超时 + 总截止(25min)+ 响应体上限(10MB)
   const DEADLINE_MS = 25 * 60 * 1000;
   const MAX_BODY = 10 * 1024 * 1024;
@@ -60,7 +89,13 @@ function postJson(urlStr, headers, bodyObj, timeoutMs = 20 * 60 * 1000) {
     const body = Buffer.from(JSON.stringify(bodyObj), "utf8");
     const req = mod.request(u, {
       method: "POST",
-      headers: { ...headers, "Content-Type": "application/json", "Content-Length": body.length },
+      servername: opts.serverName,   // https:SNI 与证书校验仍用原主机名(IP 直连时)
+      headers: {
+        ...(opts.hostHeader ? { Host: opts.hostHeader } : {}),
+        ...headers,
+        "Content-Type": "application/json",
+        "Content-Length": body.length,
+      },
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
@@ -118,6 +153,13 @@ async function analyze(transcript, cfg, log = console.log) {
 async function analyzeOnce(transcript, cfg, provider, log = console.log) {
   await assertLlmUrl(cfg.baseUrl, { allowPrivate: !!cfg.allowPrivate });   // R05:发请求前校验地址
   samplingTruncatedFlag.value = false;
+  // R05 三轮:解析+校验一次,拿到绑定 IP 的连接地址——后续请求只发往该校验过的 IP
+  const { connectBaseUrl, originalHost, hostname } = await resolveLlmTarget(cfg.baseUrl, {
+    allowPrivate: !!cfg.allowPrivate,
+    allowedHosts: Array.isArray(cfg.allowedHosts) ? cfg.allowedHosts : [],
+  });
+  const ipHost = new URL(connectBaseUrl).hostname;   // 已是校验过的 IP 字面量(IPv6 带方括号)
+  const connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: hostname, hostHeader: originalHost };
   const { prompt, truncated: samplingTruncated, coverage } = buildPrompt(transcript);
   const system = "你是专业的会议纪要分析师。只输出 JSON,不要输出任何其他文字。";
   console.log(`[llm] 模型=${cfg.model} 转写 ${transcript.length} 字 → 提示 ${prompt.length} 字${samplingTruncated ? `(采样覆盖率约 ${coverage}%)` : ""}`);
@@ -125,7 +167,7 @@ async function analyzeOnce(transcript, cfg, provider, log = console.log) {
   let res, j;
   if (provider === "anthropic") {
     // Anthropic Messages 协议(智谱 anthropic 兼容端点等)
-    res = await postJson(`${cfg.baseUrl.replace(/\/$/, "")}/v1/messages`, {
+    res = await postJson(`${connectBaseUrl.replace(/\/$/, "")}/v1/messages`, {
       "x-api-key": cfg.apiKey,
       "anthropic-version": "2023-06-01",
     }, {
@@ -133,7 +175,7 @@ async function analyzeOnce(transcript, cfg, provider, log = console.log) {
       max_tokens: 16384,   // 求同存疑等章节加入后,8192 会被截断(无闭合括号)
       system,
       messages: [{ role: "user", content: prompt }],
-    });
+    }, undefined, connOpts);
     if (res.status < 200 || res.status >= 300) {
       const err = new Error(`LLM API HTTP ${res.status}: ${res.text.slice(0, 200)}`);
       if (res.status >= 400 && res.status < 500) err.noRetry = true;   // R17:确定性错误不重试
@@ -156,7 +198,7 @@ async function analyzeOnce(transcript, cfg, provider, log = console.log) {
   }
 
   // OpenAI 兼容协议
-  res = await postJson(`${cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+  res = await postJson(`${connectBaseUrl.replace(/\/$/, "")}/chat/completions`, {
     Authorization: `Bearer ${cfg.apiKey}`,
   }, {
     model: cfg.model,
@@ -166,7 +208,7 @@ async function analyzeOnce(transcript, cfg, provider, log = console.log) {
       { role: "user", content: prompt },
     ],
     temperature: 0.3,
-  });
+  }, undefined, connOpts);
   if (res.status < 200 || res.status >= 300) {
     const err = new Error(`LLM API HTTP ${res.status}: ${res.text.slice(0, 200)}`);
     if (res.status >= 400 && res.status < 500) err.noRetry = true;
@@ -368,4 +410,4 @@ function mockAnalysis(transcript) {
   };
 }
 
-module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson, assertLlmUrl, isPrivateIp, hasUsableConfig };   // 后五者导出供回归测试
+module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson, assertLlmUrl, resolveLlmTarget, isPrivateIp, hostAllowed, hasUsableConfig };   // 供回归测试

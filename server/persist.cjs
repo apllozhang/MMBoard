@@ -21,9 +21,10 @@ function renameWithRetry(tmp, file, attempts = 6) {
   }
 }
 
-/** 原子写:临时文件 + rename;写前保留一份 .bak */
+/** 原子写:临时文件 + rename;写前保留一份 .bak。
+ *  三轮复审 R09:tmp 名带进程号与随机后缀,多进程写同一状态文件时互不覆盖(固定 .tmp 会互相踩踏)。 */
 function writeJsonAtomic(file, obj) {
-  const tmp = file + ".tmp";
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
   try { if (fs.existsSync(file)) fs.copyFileSync(file, file + ".bak"); } catch { /* best effort */ }
   renameWithRetry(tmp, file);

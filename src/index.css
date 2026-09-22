@@ -6,6 +6,10 @@
 
 @layer base {
   html { scroll-behavior: smooth; }
+  /* 三轮复审 R23:320px 窄屏无页面级横向滚动——表格等宽内容在各自容器内局部滚动
+     (overflow-x-auto),根元素 hidden 禁掉文档级横向滚动(hidden 在根元素=视口不可横向滚动;
+     纵向滚动不受影响,表格容器内部横向滚动不受影响) */
+  html { overflow-x: hidden; }
   body {
     @apply bg-canvas text-text-primary font-sans;
     font-size: 16px;

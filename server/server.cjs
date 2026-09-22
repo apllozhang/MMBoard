@@ -103,7 +103,8 @@ function loadSecret() {
   const act = (st.models || []).find((x) => x.id === st.activeId);
   if (act && act.apiKey && act.model && act.baseUrl) {
     s.llm = { provider: act.provider, baseUrl: act.baseUrl, apiKey: act.apiKey, model: act.model,
-              allowPrivate: !!st.allowPrivateLlmHosts };   // R05:内网 LLM 需显式放行
+              allowPrivate: !!st.allowPrivateLlmHosts,   // R05:旧式全放行开关(已弃用,保留兼容)
+              allowedHosts: Array.isArray(st.allowedLlmHosts) ? st.allowedLlmHosts : [] };   // R05 三轮:精确主机/端口白名单
   }
   /* 转写通道:settings.asr 存在即生效(provider: iflytek | local);讯飞参数 settings 优先 */
   if (st.asr && st.asr.provider) s.asr = { provider: st.asr.provider, localUrl: st.asr.localUrl || "" };
@@ -536,9 +537,13 @@ app.get("/api/tasks/:id/rerun-preview", async (req, res) => {
     if (!audioSeconds) return res.status(409).json({ error: "无法探测音频时长(源文件缺失或损坏)" });
   }
   const provider = loadSecret().asr?.provider === "local" ? "local" : "iflytek";
-  const day = localDay();   // R22:额度口径 = 本地自然日
-  const dailySeconds = dailyAsrQuota();
-  const usedSeconds = readQuota(day);
+  let usedSeconds, dailySeconds;
+  try {
+    dailySeconds = dailyAsrQuota();
+    usedSeconds = readQuota(localDay());   // R22:额度口径 = 本地自然日;三轮 R09:损坏明确报错
+  } catch (e) {
+    return res.status(503).json({ error: e.message });
+  }
   const freeSeconds = Math.max(0, Math.round((dailySeconds - usedSeconds) * 10) / 10);
   res.json({
     provider,

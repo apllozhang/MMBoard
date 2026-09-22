@@ -12,10 +12,11 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
-const BASE = "https://raasr.xfyun.cn/api";
+const BASE = process.env.IFLYTEK_API_BASE || "https://raasr.xfyun.cn/api";   // 可注入:stub 测试用
 const CHUNK = 10 * 1024 * 1024;          // 官方建议分片 10MB
-const POLL_INTERVAL = 5000;
-const POLL_TIMEOUT = 30 * 60 * 1000;
+const POLL_INTERVAL = Number(process.env.IFLYTEK_POLL_MS) || 5000;           // 可注入:测试加速
+const POLL_TIMEOUT = Number(process.env.IFLYTEK_POLL_TIMEOUT_MS) || 30 * 60 * 1000;
+const POLL_RETRY_MAX = Number(process.env.IFLYTEK_POLL_RETRY_MAX) || 5;      // R17:轮询瞬态错误重试上限
 
 /** 4.1 配置 schema 统一:settings/密钥文件统一为 appId+apiKey+apiSecret;
  *  旧字段 secretKey 作为 apiSecret 的别名兼容。返回规范化配置。 */
@@ -144,50 +145,78 @@ async function transcribe(audioPath, cfg, log = console.log) {
   const merged = await postForm("merge", { app_id: appId, signa, ts, task_id: taskId });
   if (merged.ok !== 0) throw new Error(`讯飞 merge 失败: ${merged.err_no} ${merged.failed ?? ""}`.trim());
 
-  /* 4) 轮询 getProgress(status=9) → getResult */
+  /* 4) 轮询 getProgress(status=9) → getResult
+     R17 三轮:按错误类别控制的有限重试——网络层异常(断连/超时/HTTP 5xx)为瞬态,
+     指数退避(5s 起步,×2 封顶 60s,±20% jitter)最多重试 5 次;业务码(err_no≠0)
+     与 status=-1 为确定性错误,立即失败。每次轮询记录请求序号与结果。 */
+  const TRANSIENT_RETRY_MAX = POLL_RETRY_MAX;
+  let transientErrors = 0;
+  let backoffMs = POLL_INTERVAL;
+  let pollSeq = 0;
   const deadline = Date.now() + POLL_TIMEOUT;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL));
-    ({ ts, signa } = makeSigna(appId, secretKey));
-    const p = await postForm("getProgress", { app_id: appId, signa, ts, task_id: taskId });
-    if (p.ok !== 0) throw new Error(`讯飞 getProgress 失败: ${p.err_no} ${p.failed ?? ""}`.trim());
-    const status = typeof p.data === "string" ? JSON.parse(p.data).status : p.data?.status;
-    log(`[iflytek] progress status=${status}`);
-    if (status === 9) {
+    await new Promise((r) => setTimeout(r, backoffMs));
+    pollSeq += 1;
+    try {
       ({ ts, signa } = makeSigna(appId, secretKey));
-      const r = await postForm("getResult", { app_id: appId, signa, ts, task_id: taskId });
-      if (r.ok !== 0) throw new Error(`讯飞 getResult 失败: ${r.err_no} ${r.failed ?? ""}`.trim());
-      const rows = typeof r.data === "string" ? JSON.parse(r.data) : r.data;
-      const segs = (rows ?? [])
-        .filter((x) => x && x.onebest)
-        .map((x) => ({
-          start: Number(x.bg) || 0,
-          end: Number(x.ed) || 0,
-          speaker: String(x.speaker ?? "").trim(),
-          text: String(x.onebest).trim(),
-        }));
-      if (!segs.length) throw new Error("讯飞转写结果为空");
-      const hasSpeakers = segs.some((s) => s.speaker);
-      const fmt = (ms) => {
-        const s = Math.round(ms / 1000);
-        return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-      };
-      // 同一说话人的连续句合并为一行:[MM:SS] 说话人N: 内容;无角色则只带时间戳
-      const lines = [];
-      let last = null;
-      for (const s of segs) {
-        const head = `[${fmt(s.start)}]` + (hasSpeakers ? ` 说话人${s.speaker || "?"}:` : "");
-        if (hasSpeakers && s.speaker && s.speaker === last && lines.length) {
-          lines[lines.length - 1].text += " " + s.text;
-        } else {
-          lines.push({ head, text: s.text });
-        }
-        last = s.speaker;
+      let p;
+      try {
+        p = await postForm("getProgress", { app_id: appId, signa, ts, task_id: taskId });
+      } catch (e) {
+        // 三轮 R17 错误分类:网络异常/超时/HTTP 5xx = 瞬态(重试);HTTP 4xx = 确定性(立即失败)
+        if (/HTTP 4\d\d/.test(e.message)) e.isTransient = false;
+        else if (/HTTP 5\d\d/.test(e.message) || !/HTTP \d{3}/.test(e.message)) e.isTransient = true;
+        throw e;
       }
-      const text = lines.map((l) => `${l.head} ${l.text}`).join("\n");
-      return { text, segments: segs, hasSpeakers, mock: false };
+      if (p.ok !== 0) throw new Error(`讯飞 getProgress 失败: ${p.err_no} ${p.failed ?? ""}`.trim());   // 业务码 = 确定性
+      const status = typeof p.data === "string" ? JSON.parse(p.data).status : p.data?.status;
+      log(`[iflytek] poll #${pollSeq} status=${status}${transientErrors ? `(此前瞬态重试 ${transientErrors}/${TRANSIENT_RETRY_MAX})` : ""}`);
+      if (status === 9) {
+        ({ ts, signa } = makeSigna(appId, secretKey));
+        const r = await postForm("getResult", { app_id: appId, signa, ts, task_id: taskId });
+        if (r.ok !== 0) throw new Error(`讯飞 getResult 失败: ${r.err_no} ${r.failed ?? ""}`.trim());
+        const rows = typeof r.data === "string" ? JSON.parse(r.data) : r.data;
+        const segs = (rows ?? [])
+          .filter((x) => x && x.onebest)
+          .map((x) => ({
+            start: Number(x.bg) || 0,
+            end: Number(x.ed) || 0,
+            speaker: String(x.speaker ?? "").trim(),
+            text: String(x.onebest).trim(),
+          }));
+        if (!segs.length) throw new Error("讯飞转写结果为空");
+        const hasSpeakers = segs.some((s) => s.speaker);
+        const fmt = (ms) => {
+          const s = Math.round(ms / 1000);
+          return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+        };
+        // 同一说话人的连续句合并为一行:[MM:SS] 说话人N: 内容;无角色则只带时间戳
+        const lines = [];
+        let last = null;
+        for (const s of segs) {
+          const head = `[${fmt(s.start)}]` + (hasSpeakers ? ` 说话人${s.speaker || "?"}:` : "");
+          if (hasSpeakers && s.speaker && s.speaker === last && lines.length) {
+            lines[lines.length - 1].text += " " + s.text;
+          } else {
+            lines.push({ head, text: s.text });
+          }
+          last = s.speaker;
+        }
+        const text = lines.map((l) => `${l.head} ${l.text}`).join("\n");
+        return { text, segments: segs, hasSpeakers, mock: false };
+      }
+      if (status === -1) throw new Error("讯飞转写任务失败(status=-1)");
+      transientErrors = 0;          // 本轮正常,重置退避
+      backoffMs = POLL_INTERVAL;
+    } catch (e) {
+      if (!e.isTransient) throw e;   // 确定性错误立即失败
+      transientErrors += 1;
+      if (transientErrors > TRANSIENT_RETRY_MAX) {
+        throw new Error(`讯飞轮询连续瞬态错误 ${transientErrors - 1} 次超过上限(${TRANSIENT_RETRY_MAX}),最后错误: ${e.message}`);
+      }
+      log(`[iflytek] poll #${pollSeq} 瞬态错误(${transientErrors}/${TRANSIENT_RETRY_MAX}),${Math.round(backoffMs / 1000)}s 后退避重试: ${e.message}`);
+      backoffMs = Math.min(Math.round(backoffMs * 2 * (0.9 + Math.random() * 0.2)), 60000);   // 指数退避 + jitter,封顶 60s
     }
-    if (status === -1) throw new Error("讯飞转写任务失败(status=-1)");
   }
   throw new Error(`讯飞转写轮询超时(${POLL_TIMEOUT / 60000} 分钟)`);
 }

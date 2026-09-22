@@ -197,12 +197,15 @@ export default function MeetingBoardPage() {
     </div>
   );
 
-  /** 任务进度条(百分比 + 当前阶段;失败红条停在已完成处) */
+  /** 任务进度条(百分比 + 当前阶段;失败红条停在已完成处)
+   *  三轮复审 R23:补 role=progressbar 与 aria-valuenow(此前仅容器 aria-label,读屏不可感知进度) */
   const progressBar = (row: MeetingTask) => {
     const { pct, running } = taskProgress(row);
     const failed = row.stage === "failed";
     return (
-      <div className="flex items-center gap-2" aria-label={`${t("board.col.progress")} ${pct}%`}>
+      <div className="flex items-center gap-2"
+           role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
+           aria-label={`${t("board.col.progress")} ${pct}%`}>
         <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full" style={{ background: "var(--color-border-soft)" }}>
           <div className="h-full rounded-full transition-all duration-500"
                style={{ width: `${pct}%`,

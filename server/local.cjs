@@ -6,9 +6,60 @@
 "use strict";
 const fs = require("fs");
 const path = require("path");
+const net = require("net");
+const dns = require("dns").promises;
 
 const POLL_MS = 3000;
 const DEFAULT_TIMEOUT_SEC = 90 * 60;   // 长会议 CPU 转写上限
+
+/* R05 三轮:本地 ASR 地址策略(与 server.cjs validLocalUrl 同一私网集合) */
+const PRIVATE_URL = /^https?:\/\/(localhost|\[::1\]|127\.0\.0\.1|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)(:\d+)?(\/|$)/i;
+
+function isPrivateIp(ip) {
+  const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+  if (net.isIPv4(v4)) {
+    const [a, b] = v4.split(".").map(Number);
+    if (a === 127 || a === 10 || a === 0) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;
+    return false;
+  }
+  return net.isIPv6(ip) && (ip === "::1" || /^(f[cd]|fe[89ab])/i.test(ip));
+}
+
+/** R05 三轮:受控 fetch——每跳校验目的地址,redirect: manual 杜绝自动跟随绕过;
+ *  解析一次 DNS 并以 IP 直连(Host 头保留原主机),消除 rebinding 窗口。 */
+async function guardedFetch(rawUrl, init = {}, { maxHops = 3 } = {}) {
+  let url = new URL(String(rawUrl));
+  for (let hop = 0; ; hop++) {
+    if (!PRIVATE_URL.test(url.href)) {
+      throw new Error(`本地转写地址不符合内网策略(已拒绝): ${url.href}`);
+    }
+    // 解析一次并校验,连接发往该 IP(hostname 为 IP 字面量时直接使用)
+    let connectHost = url.hostname;
+    if (!net.isIP(connectHost.replace(/^\[|\]$/g, ""))) {
+      const resolved = await dns.lookup(connectHost.replace(/^\[|\]$/g, ""));
+      if (!isPrivateIp(resolved.address)) {
+        throw new Error(`本地转写地址解析到非内网 IP(${resolved.address}),已拒绝: ${url.hostname}`);
+      }
+      connectHost = resolved.address.includes(":") ? `[${resolved.address}]` : resolved.address;
+    }
+    const ipUrl = new URL(url.href);
+    ipUrl.hostname = connectHost;
+    const res = await fetch(ipUrl, {
+      ...init,
+      redirect: "manual",   // 三轮复审 R05:禁用自动重定向,逐跳校验
+      headers: { ...(init.headers || {}), Host: url.host },
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+      if (hop >= maxHops) throw new Error(`本地转写服务重定向次数超过 ${maxHops},已中止`);
+      url = new URL(res.headers.get("location"), url);
+      continue;   // 下一跳重新走完整校验(地址/解析/IP 直连)
+    }
+    return res;
+  }
+}
 
 async function transcribe(audioPath, cfg = {}, log = () => {}) {
   const base = String(cfg.localUrl || "").replace(/\/$/, "");
@@ -19,7 +70,7 @@ async function transcribe(audioPath, cfg = {}, log = () => {}) {
   const htimer = setTimeout(() => hctl.abort(), 8000);
   let health;
   try {
-    health = await (await fetch(`${base}/health`, { signal: hctl.signal })).json();
+    health = await (await guardedFetch(`${base}/health`, { signal: hctl.signal })).json();
   } catch {
     throw new Error(`本地转写服务不可达: ${base}(检查工作机服务是否启动)`);
   } finally {
@@ -36,7 +87,7 @@ async function transcribe(audioPath, cfg = {}, log = () => {}) {
   const stimer = setTimeout(() => sctl.abort(), 10 * 60 * 1000);   // 上传大文件宽限
   let sub;
   try {
-    const r = await fetch(`${base}/tasks`, { method: "POST", body: form, signal: sctl.signal });
+    const r = await guardedFetch(`${base}/tasks`, { method: "POST", body: form, signal: sctl.signal });
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 160)}`);
     sub = await r.json();
   } finally {
@@ -53,7 +104,7 @@ async function transcribe(audioPath, cfg = {}, log = () => {}) {
     const ptimer = setTimeout(() => pctl.abort(), 15000);
     let st;
     try {
-      const r = await fetch(`${base}/tasks/${sub.id}`, { signal: pctl.signal });
+      const r = await guardedFetch(`${base}/tasks/${sub.id}`, { signal: pctl.signal });
       clearTimeout(ptimer);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       st = await r.json();
@@ -78,4 +129,4 @@ async function transcribe(audioPath, cfg = {}, log = () => {}) {
   }
 }
 
-module.exports = { transcribe };
+module.exports = { transcribe, guardedFetch, PRIVATE_URL };

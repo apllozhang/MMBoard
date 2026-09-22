@@ -31,14 +31,51 @@ async function section(name, fn) {
 }
 
 /* ── 隔离环境:先做纯单元断言(auth/persist),再起 HTTP 服务做集成 ── */
+const http = require("http");
 process.env.MMB_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "mmb-verify-a-"));
 process.env.PORT = String(18000 + Math.floor(Math.random() * 2000));
 process.env.MMB_ADMIN_PASSWORD = "VerifyPass-批次A-123";
 const DATA = process.env.MMB_DATA_DIR;
 
+/* 讯飞 API stub(三轮 R17):真实 HTTP 全链路(prepare/upload/merge/轮询),行为由 iflyStub.mode 控制 */
+process.env.IFLYTEK_POLL_MS = "60";
+process.env.IFLYTEK_POLL_RETRY_MAX = "5";
+const iflyStub = { mode: "ok9", progressCount: 0, requests: [] };
+const iflyStubSrv = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => body += c);
+  req.on("end", () => {
+    iflyStub.requests.push(req.url);
+    const j = (obj) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
+    if (req.url.endsWith("/prepare")) return j({ ok: 0, data: "stub-task-1" });
+    if (req.url.endsWith("/upload")) return j({ ok: 0 });
+    if (req.url.endsWith("/merge")) return j({ ok: 0 });
+    if (req.url.endsWith("/getProgress")) {
+      iflyStub.progressCount += 1;
+      if (iflyStub.mode === "http500") {
+        if (iflyStub.progressCount <= 2) { res.writeHead(500); return res.end("stub 500"); }   // 瞬态 ×2 后恢复
+        iflyStub.mode = "ok9";
+      }
+      if (iflyStub.mode === "neterr") { req.socket.destroy(); return; }                        // 每次断连
+      if (iflyStub.mode === "fail") return j({ ok: 1, err_no: 26601, failed: "illegal app" }); // 确定性
+      return j({ ok: 0, data: JSON.stringify({ status: 9 }) });
+    }
+    if (req.url.endsWith("/getResult")) {
+      return j({ ok: 0, data: JSON.stringify([{ bg: 0, ed: 2000, speaker: "0", onebest: "stub 转写句子" }]) });
+    }
+    res.writeHead(404); res.end();
+  });
+});
+/* IFLYTEK_API_BASE 需在 require 模块前注入 */
+new Promise((resolve) => iflyStubSrv.listen(0, "127.0.0.1", resolve)).then(() => {
+  process.env.IFLYTEK_API_BASE = `http://127.0.0.1:${iflyStubSrv.address().port}/api`;
+  boot();
+});
+function boot() {
+
 const auth = require(path.join(ROOT, "server", "auth.cjs"));
 const persist = require(path.join(ROOT, "server", "persist.cjs"));
-const http = require("http");
+
 
 /* stub LLM(OpenAI 形状):捕获收到的 prompt;mode 切换响应行为,供故障注入与 canonical 断言 */
 function startLlmStub() {
@@ -455,6 +492,12 @@ await section("speaker canonical 端到端(stub LLM + mock 转写)", async () =>
     const min2 = await (await api("GET", `/api/tasks/${task.id}/minutes`)).text();
     ok("二次改名后纪要含新名「改名乙」", min2.includes("改名乙"));
     ok("二次改名后旧名「改名甲」零残留", !min2.includes("改名甲"));
+    // 三轮 R09:产物状态文件原子写——analysis.json 为合法 JSON 对象,目录无 .tmp 残留
+    const outDir2 = path.join(DATA, "outputs", final.dirKey || final.id);
+    const analysisJson = JSON.parse(fs.readFileSync(path.join(outDir2, "analysis.json"), "utf8"));
+    ok("analysis.json 为原子写的合法 JSON 对象", analysisJson && typeof analysisJson === "object" && analysisJson.analysis);
+    const strayTmp = fs.readdirSync(outDir2).filter((f) => f.endsWith(".tmp"));
+    ok("产物目录无 .tmp 残留(原子写收尾干净)", strayTmp.length === 0, strayTmp.join(","));
     // 清理测试任务
     await api("DELETE", `/api/tasks/${task.id}`);
   } finally {
@@ -477,6 +520,28 @@ await section("R02 高水位:删除当天最新任务后编号不复用(运行�
   const hw = JSON.parse(fs.readFileSync(path.join(DATA, "seq-highwater.json"), "utf8"));
   const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   ok("高水位文件记录当日已分配序号", Number(hw[day]) >= parseInt(latest.id.split("-").pop(), 10), JSON.stringify(hw));
+
+  // 三轮 R09:高水位主备同时损坏 → 明确失败(不静默回零导致编号复用)
+  fs.writeFileSync(path.join(DATA, "seq-highwater.json"), "{corrupt-main");
+  fs.writeFileSync(path.join(DATA, "seq-highwater.json.bak"), "{corrupt-bak");
+  let hwErr = "";
+  try { pipeline.createTask("hw-d.wav", "d.wav", 1); } catch (e) { hwErr = e.message; }
+  ok("高水位主备双坏 → createTask 明确失败", hwErr.includes("序列高水位文件损坏"), hwErr.slice(0, 100));
+  fs.rmSync(path.join(DATA, "seq-highwater.json.bak"), { force: true });
+  fs.rmSync(path.join(DATA, "seq-highwater.json"), { force: true });   // 恢复后可继续
+
+  // 三轮 R09:额度文件主备同时损坏 → 明确失败(不静默回零放大免费额度)
+  fs.writeFileSync(path.join(DATA, "quota.json"), "{corrupt-main");
+  fs.writeFileSync(path.join(DATA, "quota.json.bak"), "{corrupt-bak");
+  let qErr = "";
+  try { pipeline.readQuota(pipeline.localDay()); } catch (e) { qErr = e.message; }
+  ok("额度主备双坏 → readQuota 明确失败", qErr.includes("额度记账文件损坏"), qErr.slice(0, 100));
+  let rqErr = "";
+  try { pipeline.recordQuota(10); } catch (e) { rqErr = e.message; }
+  ok("额度主备双坏 → recordQuota 明确失败", rqErr.includes("额度记账文件损坏"), rqErr.slice(0, 100));
+  fs.rmSync(path.join(DATA, "quota.json.bak"), { force: true });
+  fs.rmSync(path.join(DATA, "quota.json"), { force: true });
+
   const cleanup = pipeline.loadTasks().filter((t) => t.id !== a.id && t.id !== next.id);
   pipeline.saveTasks(cleanup);
 });
@@ -493,6 +558,95 @@ await section("R22 补充:settings/asr 纳入 version 冲突控制(运行期)", 
   const st = await (await api("GET", "/api/settings")).json();
   ok("GET settings 版本与写路径一致", st.version === 8, `实际 ${st.version}`);
   await api("PUT", "/api/settings/asr", { provider: "iflytek", version: gj.version });
+});
+
+await section("R05 三轮:精确白名单、IP 直连(关闭 rebinding)、重定向逐跳校验", async () => {
+  // ① hostAllowed 精确匹配语义
+  ok("白名单精确匹配 host:port", llm.hostAllowed("127.0.0.1", "11434", ["127.0.0.1:11434"]) === true);
+  ok("白名单仅 host 时匹配任意端口", llm.hostAllowed("10.0.0.5", "80", ["10.0.0.5"]) === true);
+  ok("端口不同的条目不匹配", llm.hostAllowed("127.0.0.1", "80", ["127.0.0.1:11434"]) === false);
+
+  // ② DNS 解析→IP 绑定:patch dns.lookup 模拟域名解析,连接必须发往解析出的 IP
+  const dnsMod = require("dns").promises;
+  const origLookup = dnsMod.lookup;
+  const { srv: asrStubSrv, asrHits } = await new Promise((resolve) => {
+    const hits = { redir: 0, final: 0 };
+    const s = http.createServer((req, res) => {
+      if (req.url === "/redir302-outer") { hits.redir++; res.writeHead(302, { Location: "http://93.184.216.34/evil" }); return res.end(); }
+      if (req.url === "/redir302-inner") { hits.redir++; res.writeHead(302, { Location: "/final" }); return res.end(); }
+      if (req.url === "/final") { hits.final++; res.writeHead(200, { "Content-Type": "application/json" }); return res.end('{"ok":true}'); }
+      res.writeHead(404); res.end();
+    });
+    s.listen(0, "127.0.0.1", () => resolve({ srv: s, asrHits: hits, port: s.address().port }));
+  });
+  const asrPort = asrStubSrv.address().port;
+  const localAsr = require(path.join(ROOT, "server", "local.cjs"));
+  try {
+    dnsMod.lookup = async (host, opts = {}) => {
+      if (host === "fake-llm.test") {
+        if (opts && opts.all) return [{ address: "127.0.0.1", family: 4 }];
+        return { address: "127.0.0.1", family: 4 };
+      }
+      return origLookup(host, opts);
+    };
+    // 域名解析到私网且不在白名单、未开 allowPrivate → 拒绝
+    let e1 = "";
+    try { await llm.resolveLlmTarget("http://fake-llm.test:9999/v1", {}); } catch (e) { e1 = e.message; }
+    ok("解析到私网且无白名单 → 拒绝并提示 allowedLlmHosts", e1.includes("allowedLlmHosts"), e1);
+    // 加入精确白名单 → 通过,连接地址绑定解析 IP
+    const t = await llm.resolveLlmTarget("http://fake-llm.test:9999/v1", { allowedHosts: ["fake-llm.test:9999"] });
+    ok("白名单命中 → 放行且连接地址绑定解析 IP", t.connectBaseUrl === "http://127.0.0.1:9999" && t.originalHost === "fake-llm.test:9999",
+       JSON.stringify(t));
+    // 旧式布尔仍兼容
+    const t2 = await llm.resolveLlmTarget("http://fake-llm.test:9999/v1", { allowPrivate: true });
+    ok("allowPrivateLlmHosts 布尔兼容保留", t2.connectBaseUrl === "http://127.0.0.1:9999");
+
+    // ③ ASR:重定向到外网被拒;内网 302 正常逐跳跟随(每跳校验)
+    let e2 = "";
+    try { await localAsr.guardedFetch(`http://127.0.0.1:${asrPort}/redir302-outer`); } catch (e) { e2 = e.message; }
+    ok("ASR 重定向到非内网地址 → 逐跳校验拒绝", e2.includes("不符合内网策略"), e2);
+    const okRes = await localAsr.guardedFetch(`http://127.0.0.1:${asrPort}/redir302-inner`);
+    ok("ASR 内网 302 逐跳跟随成功(真实跟随到 /final)", okRes.status === 200 && asrHits.final === 1 && asrHits.redir === 2,
+       `hits=${JSON.stringify(asrHits)}`);   // redir=2:此前外网拒绝用例 1 次 + 本用例 1 次
+    let e3 = "";
+    try { await localAsr.guardedFetch("http://93.184.216.34/"); } catch (e) { e3 = e.message; }
+    ok("ASR 直连非内网地址 → 直接拒绝", e3.includes("不符合内网策略"), e3);
+  } finally {
+    dnsMod.lookup = origLookup;
+    asrStubSrv.close();
+  }
+});
+
+await section("R17 三轮:讯飞轮询分类重试(stub 真实 HTTP 全链路)", async () => {
+  const iflytek = require(path.join(ROOT, "server", "iflytek.cjs"));
+  const wavPath = path.join(os.tmpdir(), `ifly-stub-${Date.now()}.wav`);
+  fs.writeFileSync(wavPath, makeWav(1));
+  const cfg = { appId: "stub-app", apiKey: "stub-key", apiSecret: "stub-secret" };
+  const logs = [];
+  const logFn = (...a) => logs.push(a.join(" "));
+
+  // ① 瞬态 5xx ×2 → 指数退避重试 → 成功;每次轮询有请求记录
+  iflyStub.mode = "http500"; iflyStub.progressCount = 0; iflyStub.requests.length = 0;
+  const r1 = await iflytek.transcribe(wavPath, cfg, logFn);
+  ok("讯飞 5xx 瞬态 ×2 退避重试后成功", r1.mock === false && r1.text.includes("stub 转写句子") && iflyStub.progressCount >= 3,
+     `progress=${iflyStub.progressCount}`);
+  ok("轮询请求有记录(poll #n 日志)", logs.some((l) => l.includes("poll #")), logs.slice(-4).join(" | "));
+
+  // ② 确定性业务码 26601 → 立即失败,零重试
+  iflyStub.mode = "fail"; iflyStub.progressCount = 0; iflyStub.requests.length = 0;
+  let e2 = "";
+  try { await iflytek.transcribe(wavPath, cfg, logFn); } catch (e) { e2 = e.message; }
+  ok("业务码 26601 → 立即失败(确定性,不重试)", e2.includes("26601") && iflyStub.progressCount === 1,
+     `${e2.slice(0, 80)} progress=${iflyStub.progressCount}`);
+
+  // ③ 持续网络断连 → 超过重试上限(5)后明确失败
+  iflyStub.mode = "neterr"; iflyStub.progressCount = 0; iflyStub.requests.length = 0;
+  let e3 = "";
+  try { await iflytek.transcribe(wavPath, cfg, logFn); } catch (e) { e3 = e.message; }
+  ok("持续断连 → 超过重试上限明确失败", e3.includes("超过上限") && iflyStub.progressCount >= 5,
+     `${e3.slice(0, 100)} progress=${iflyStub.progressCount}`);
+  fs.rmSync(wavPath, { force: true });
+  iflyStub.mode = "ok9";
 });
 
 await section("集成:队列满防线(单元级)与 restart 前置检查顺序", async () => {
@@ -519,3 +673,4 @@ if (failures.length) { console.log("失败项:"); failures.forEach((f) => consol
 process.exit(0);
 
 })().catch((e) => { console.error(e); process.exit(1); });
+}   // boot():讯飞 stub 监听就绪后再加载模块(IFLYTEK_API_BASE 先于 require 注入)

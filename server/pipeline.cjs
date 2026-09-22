@@ -53,19 +53,26 @@ function localDay(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function readQuotaMap() {
+  try { return readJsonWithRecovery(QUOTA_FILE); }
+  catch (e) {
+    if (e && e.code === "ENOENT") return {};
+    // 三轮复审 R09:主备同时损坏不得静默回零(额度会被重置放大)——明确失败
+    throw new Error(`额度记账文件损坏且无法恢复(${QUOTA_FILE}),为防止免费额度被重置,相关操作已中止;请人工修复该文件(JSON 格式 {"YYYY-MM-DD": 秒})后重试: ${e.message}`);
+  }
+}
+
 /** 当日转写用量记账:真实转写成功后按音频时长累加(秒)。mock 不记。 */
 function recordQuota(seconds) {
   const day = localDay();
-  let q;
-  try { q = readJsonWithRecovery(QUOTA_FILE); } catch { q = {}; }   // 损坏回退 .bak,皆坏按首日
+  const q = readQuotaMap();
   q[day] = Math.round(((q[day] || 0) + seconds) * 10) / 10;
   writeJsonAtomic(QUOTA_FILE, q);
   return q[day];
 }
 
 function readQuota(day) {
-  try { return JSON.parse(fs.readFileSync(QUOTA_FILE, "utf8"))[day] || 0; }
-  catch { return 0; }
+  return readQuotaMap()[day] || 0;
 }
 
 /** ffprobe 探测音频时长(秒) */
@@ -163,7 +170,12 @@ function checkRunAlive(taskId, runId) {
  *  旧书签/审计/外部调用保存的 /api/tasks/MT-xxx 永远不会指向另一条任务。 */
 const SEQ_FILE = path.join(DATA, "seq-highwater.json");   // {"YYYYMMDD": 已分配最大序号}
 function loadSeqHighwater() {
-  try { return readJsonWithRecovery(SEQ_FILE); } catch { return {}; }   // 损坏/不存在按零起点(扫描兜底)
+  try { return readJsonWithRecovery(SEQ_FILE); }
+  catch (e) {
+    if (e && e.code === "ENOENT") return {};   // 首次运行:扫描现存任务/目录兜底
+    // 三轮复审 R09:主备同时损坏不得静默回零(会导致编号复用)——明确失败,提示人工修复
+    throw new Error(`序列高水位文件损坏且无法恢复(${SEQ_FILE}),已拒绝创建新任务以防编号复用;请人工修复该文件(JSON 格式 {"YYYYMMDD": 最大序号})后重试: ${e.message}`);
+  }
 }
 
 function createTask(storageKey, originalName, sizeBytes) {
@@ -299,12 +311,13 @@ async function runFromExtract(task, secret, log) {
       } catch (e) { log("额度记账失败(不影响任务):", e.message); }
     }
 
-    /* 转写落盘:后续"重跑分析"可复用,不必重新转写(省讯飞额度) */
+    /* 转写落盘:后续"重跑分析"可复用,不必重新转写(省讯飞额度)
+       三轮复审 R09:状态文件统一原子持久化 */
     try {
       const outDir = taskDir(task);
       fs.mkdirSync(outDir, { recursive: true });
-      fs.writeFileSync(path.join(outDir, "transcript.json"),
-        JSON.stringify({ text, segments: segments || [], hasSpeakers: !!hasSpeakers }, null, 2));
+      writeJsonAtomic(path.join(outDir, "transcript.json"),
+        { text, segments: segments || [], hasSpeakers: !!hasSpeakers, speakerMap: task.speakerMap || {} });
     } catch (e) { log("转写文本落盘失败(不影响本次任务):", e.message); }
 
     await analyzeAndRender(task, secret, log, { text, segments, hasSpeakers, transcriptionMode: useLocal ? "local" : (trMock ? "mock" : "iflytek") });
@@ -360,13 +373,14 @@ async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers
     });
     fs.writeFileSync(path.join(outDir, fileName), html, "utf8");
     // 说话人标注纯重渲染的依据:分析结果(canonical)+ 发言统计(canonical)+ 渲染元信息落盘
-    fs.writeFileSync(path.join(outDir, "analysis.json"), JSON.stringify({
+    // 三轮复审 R09:状态文件统一原子持久化(与 tasks/settings 同一 .tmp+rename+.bak 路径)
+    writeJsonAtomic(path.join(outDir, "analysis.json"), {
       analysis,
       talkStats,
       meta: { date: task.createdAt.slice(0, 10), fileName: task.originalFileName || task.fileName,
               transcriptChars: text.length, transcriptionMode, analysisMode: analysis.mock ? "mock" : "real",
               uploadedAt: task.createdAt },
-    }, null, 2));
+    });
     setStep(task.id, task.runId, "render", "done", fileName);
     updateTask(task.id, task.runId, { stage: "done", title: analysis.title || task.title, minutesFile: `${task.dirKey || task.id}/${fileName}` });
     log("流水线完成 →", fileName);
@@ -395,4 +409,4 @@ function failTask(task, e) {
   saveTasks(tasks);
 }
 
-module.exports = { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT };
+module.exports = { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay, readQuota, recordQuota, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT };

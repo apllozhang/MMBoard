@@ -209,8 +209,10 @@ export function DataTable<T extends { id: string | number }>({
         </div>
       )}
 
-      <div className="rounded-[12px] border border-border bg-surface" style={{ boxShadow: "var(--shadow-sm)" }}>
-        <div className="overflow-x-auto" ref={wrapRef}>
+      {/* 三轮复审 R23:320px 窄屏下表格在卡片内局部滚动,不再撑破页面(min-w-0/max-w-full 断开 flex min-content 链);
+          contain:paint 裁剪表格布局溢出向文档根的传播(Chromium 对表格溢出的 scrollWidth 传播 quirk) */}
+      <div className="rounded-[12px] border border-border bg-surface min-w-0 max-w-full" style={{ boxShadow: "var(--shadow-sm)", contain: "layout paint" }}>
+        <div className="overflow-x-auto max-w-full" ref={wrapRef}>
           {/* 宽度模式：userSized=false 填满容器（余量给 flex 列，R11）；拖动后精确像素（Σ列宽 + filler 兜底，只有目标列变，F14） */}
           <table className="data w-full"
                  style={userSized
