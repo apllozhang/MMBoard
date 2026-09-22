@@ -14,7 +14,7 @@ const { writeJsonAtomic, readJsonWithRecovery } = require("./persist.cjs");
 const { transcribe } = require("./iflytek.cjs");
 const localAsr = require("./local.cjs");
 const { analyze } = require("./llm.cjs");
-const { renderMinutes, applySpeakerMapDeep } = require("./minutes-template.cjs");
+const { renderMinutes, applySpeakerMapDeep, verifyActionEvidence } = require("./minutes-template.cjs");
 
 // 数据目录:默认随程序目录;隔离测试用 MMB_DATA_DIR 覆盖(生产不受影响)
 const DATA = process.env.MMB_DATA_DIR || path.join(__dirname, "data");
@@ -229,6 +229,59 @@ function taskDir(task) {
   return path.join(OUTPUTS, task.dirKey || task.id);
 }
 
+/* ── R18 三轮:上传资源治理 ── */
+const numEnv = (name, def) => { const v = Number(process.env[name]); return Number.isFinite(v) && v >= 0 ? v : def; };
+const MIN_FREE_BYTES = numEnv("MMB_MIN_FREE_BYTES", 1024 * 1024 * 1024);        // 磁盘剩余水位(默认 1GB)
+const UPLOADS_QUOTA_BYTES = numEnv("MMB_UPLOADS_QUOTA_BYTES", 20 * 1024 * 1024 * 1024); // uploads 总配额(默认 20GB)
+const USAGE_CACHE_MS = numEnv("MMB_USAGE_CACHE_MS", 60 * 1000);                  // 配额求和缓存(可注入测试)
+let usageCache = { at: 0, bytes: 0 };
+
+/** uploads 目录总占用(带缓存;缓存时长可注入) */
+function uploadsUsageBytes() {
+  if (Date.now() - usageCache.at < USAGE_CACHE_MS) return usageCache.bytes;
+  let total = 0;
+  const walk = (dir) => {
+    for (const f of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, f.name);
+      if (f.isDirectory()) walk(p);
+      else { try { total += fs.statSync(p).size; } catch { /* 竞态删除 */ } }
+    }
+  };
+  try { walk(UPLOADS); } catch { /* 目录不存在按 0 */ }
+  usageCache = { at: Date.now(), bytes: total };
+  return total;
+}
+
+/** 磁盘水位检查:剩余空间低于阈值返回提示(达标的返回 null) */
+function diskShortage() {
+  try {
+    const st = fs.statfsSync(DATA);
+    if (st.bavail * st.bsize < MIN_FREE_BYTES) {
+      return `服务器磁盘剩余空间不足(阈值 ${Math.round(MIN_FREE_BYTES / 1048576)}MB),暂不接受新上传`;
+    }
+  } catch { /* statfs 不可用的文件系统跳过水位检查 */ }
+  return null;
+}
+
+/** 总配额检查:uploads 占用超配额返回提示(达标的返回 null) */
+function quotaExceeded() {
+  if (uploadsUsageBytes() > UPLOADS_QUOTA_BYTES) {
+    return `总存储配额已满(${Math.round(UPLOADS_QUOTA_BYTES / 1073741824)}GB),请清理旧任务后重试`;
+  }
+  return null;
+}
+
+/** 媒体内容探测:文件必须是可解码的音频/视频容器且含至少一条音轨(不只看扩展名) */
+function probeHasMediaStream(filePath) {
+  try {
+    const out = execFileSync("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", filePath],
+      { timeout: 20000, windowsHide: true });
+    return String(out).trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** 异步执行流水线(不阻塞 HTTP)。opts.transcript 存在时复用已存转写文本,跳过 extract/transcribe(不耗讯飞额度)。
  *  每次 runId 对应一次执行;任何状态写入前都校验 runId,被新实例取代即静默退出,绝不覆盖新实例状态 */
 async function runPipeline(task, secret, opts = {}) {
@@ -358,6 +411,9 @@ async function analyzeAndRender(task, secret, log, { text, segments, hasSpeakers
     setStep(task.id, task.runId, "render", "running");
     const outDir = taskDir(task);
     fs.mkdirSync(outDir, { recursive: true });
+    // R15 三轮:行动项证据真实性强校验(quote/tref 与转写原文比对)——在渲染与落盘前执行,
+    // 校验状态(quoteState/trefState)随 analysis.json 持久化,纯重渲染沿用
+    verifyActionEvidence(analysis, text, segments);
     // 二轮复审 §5.1:姓名只在渲染层映射——analysis/talkStats 落盘保持 canonical(说话人N),
     // 渲染 HTML 时才应用当前人工标注,之后任意次改名纯重渲染都正确
     const speakerMap = task.speakerMap || {};
@@ -409,4 +465,4 @@ function failTask(task, e) {
   saveTasks(tasks);
 }
 
-module.exports = { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay, readQuota, recordQuota, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT };
+module.exports = { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay, readQuota, recordQuota, uploadsUsageBytes, diskShortage, quotaExceeded, probeHasMediaStream, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, AUDIO_EXT, VIDEO_EXT };

@@ -35,6 +35,7 @@ const http = require("http");
 process.env.MMB_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "mmb-verify-a-"));
 process.env.PORT = String(18000 + Math.floor(Math.random() * 2000));
 process.env.MMB_ADMIN_PASSWORD = "VerifyPass-批次A-123";
+process.env.MMB_USAGE_CACHE_MS = "0";   // R18 测试:配额求和禁用缓存,立即反映文件变化
 const DATA = process.env.MMB_DATA_DIR;
 
 /* 讯飞 API stub(三轮 R17):真实 HTTP 全链路(prepare/upload/merge/轮询),行为由 iflyStub.mode 控制 */
@@ -77,9 +78,10 @@ const auth = require(path.join(ROOT, "server", "auth.cjs"));
 const persist = require(path.join(ROOT, "server", "persist.cjs"));
 
 
-/* stub LLM(OpenAI 形状):捕获收到的 prompt;mode 切换响应行为,供故障注入与 canonical 断言 */
+/* stub LLM(OpenAI 形状):捕获收到的 prompt;mode 切换响应行为,供故障注入与 canonical 断言;
+   chunkAware=true 时区分分块 map(「第 n/N 块」)/reduce(「逐块完整核对」)请求并回显块标记 */
 function startLlmStub() {
-  const state = { prompts: [], mode: "ok" };
+  const state = { prompts: [], mode: "ok", chunkAware: false };
   const srv = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => body += c);
@@ -90,6 +92,18 @@ function startLlmStub() {
       if (state.mode === "big") {
         res.writeHead(200, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ choices: [{ message: { content: "x".repeat(11 * 1024 * 1024) }, finish_reason: "stop" }] }));
+      }
+      if (state.chunkAware) {
+        let content;
+        if (body.includes("逐块完整核对")) {
+          const marks = [...new Set(body.match(/CHUNK-DECISION-MARK-\d+/g) || [])];
+          content = JSON.stringify({ title: "T", summary: "S", topics: [], decisions: marks, actions: [], risks: [], highlights: [] });
+        } else {
+          const m = body.match(/第 (\d+)\/(\d+) 块/);
+          content = JSON.stringify({ decisions: [`CHUNK-DECISION-MARK-${m ? m[1] : "0"}`], actions: [], notes: [] });
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: "stop" }] }));
       }
       // 模拟提示词约束生效:模型 person/owner 一律输出「说话人N」编号
       const content = JSON.stringify({ title: "T", summary: "说话人0 讨论了方案", topics: [], decisions: ["通过"],
@@ -617,6 +631,64 @@ await section("R05 三轮:精确白名单、IP 直连(关闭 rebinding)、重定
   }
 });
 
+await section("R13 三轮:分块提取(map/reduce),中段唯一决议可提取", async () => {
+  const { srv: chunkSrv, state, port } = await startLlmStub();
+  try {
+    state.chunkAware = true;
+    // ~54000 字转写:唯一决议标记埋在第 2 块中段(约 39000 字处)
+    const lines = [];
+    for (let i = 0; i < 1200; i++) {
+      lines.push(i === 900
+        ? `第${i}行:经过讨论,会议决定采用 CHUNK-DECISION-MARK-2 特殊方案,由张三负责推进落实。`
+        : `第${i}行:常规讨论内容,无关键决策,仅为占位填充文本,保证转写总长度超过分块阈值。`);
+    }
+    const transcript = lines.join("\n");
+    const cfg = { provider: "openai", baseUrl: `http://127.0.0.1:${port}`, apiKey: "stub-key", model: "stub", allowPrivate: true };
+    state.prompts.length = 0;
+    const r = await llm.analyze(transcript, cfg, () => {});
+    const mapCalls = state.prompts.filter((p) => /第 \d+\/\d+ 块/.test(p)).length;   // map prompt 含「第 n/N 块」
+    ok(`分块提取:54000 字触发 2 次 map + 1 次 reduce(实际 ${state.prompts.length} 次请求)`, state.prompts.length === 3,
+       `requests=${state.prompts.length}`);
+    const lastPrompt = state.prompts[state.prompts.length - 1];
+    ok("reduce 输入包含中段块提取的决议标记", lastPrompt.includes("CHUNK-DECISION-MARK-2"));
+    ok("最终结果纳入中段决议", (r.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r.decisions));
+    ok("分块为全量核对,不再标注采样截断", r.samplingTruncated === false, `samplingTruncated=${r.samplingTruncated}`);
+    ok("map 请求确实为 2 块", mapCalls === 2, `mapCalls=${mapCalls}`);
+  } finally {
+    state.chunkAware = false;
+    chunkSrv.close();
+  }
+});
+
+await section("R15 三轮:行动项证据真实性强校验(quote/tref 与转写比对)", async () => {
+  const tmpl = require(path.join(ROOT, "server", "minutes-template.cjs"));
+  const text = "[00:00] 说话人0: 我们决定采用新方案。\n[01:00] 说话人1: 张三周五前完成评审。";
+  const segments = [{ start: 0, end: 30000, text: "我们决定采用新方案。", speaker: "0" },
+                    { start: 60000, end: 90000, text: "张三周五前完成评审。", speaker: "1" }];
+  const analysis = llm.normalizeAnalysis({ title: "T", summary: "S",
+    actions: [
+      { owner: "A", item: "真实证据", quote: "我们决定采用新方案。", tref: "00:00-00:30" },
+      { owner: "B", item: "伪造证据", quote: "这段话并不存在于转写中XYZQ", tref: "99:99-99:99" },
+      { owner: "C", item: "无证据" },
+      { owner: "D", item: "仅时间格式非法", tref: "99:99-99:99" },
+    ] });
+  tmpl.verifyActionEvidence(analysis, text, segments);
+  const [a1, a2, a3] = analysis.actions;
+  ok("真实 quote + 合法重叠 tref → verified", a1.quoteState === "verified" && a1.trefState === "verified",
+     JSON.stringify([a1.quoteState, a1.trefState]));
+  ok("假 quote → unverified;非法 tref → invalid", a2.quoteState === "unverified" && a2.trefState === "invalid",
+     JSON.stringify([a2.quoteState, a2.trefState]));
+  ok("未附证据 → none(模型推断口径不变)", a3.quoteState === "none" && a3.trefState === "none");
+  const rendered = tmpl.renderMinutes({
+    analysis,
+    meta: { date: "2026-09-22", uploadedAt: "2026-09-22T01:00:00Z", generatedAt: "2026-09-22T02:00:00Z",
+            fileName: "x.mp3", transcriptChars: 100, talkStats: [] },
+  });
+  ok("渲染:伪造 quote 显示「未在转写中核验到」警示", rendered.html.includes("所附原文未在转写中核验到"));
+  ok("渲染:非法 tref 显示「无法解析」警示", rendered.html.includes("时间范围格式无法解析"));
+  ok("渲染:真实证据不带警示", !rendered.html.includes("所附时间范围未与转写对齐"));
+});
+
 await section("R17 三轮:讯飞轮询分类重试(stub 真实 HTTP 全链路)", async () => {
   const iflytek = require(path.join(ROOT, "server", "iflytek.cjs"));
   const wavPath = path.join(os.tmpdir(), `ifly-stub-${Date.now()}.wav`);
@@ -647,6 +719,36 @@ await section("R17 三轮:讯飞轮询分类重试(stub 真实 HTTP 全链路)",
      `${e3.slice(0, 100)} progress=${iflyStub.progressCount}`);
   fs.rmSync(wavPath, { force: true });
   iflyStub.mode = "ok9";
+});
+
+await section("R18 三轮:媒体内容探测与资源治理", async () => {
+  const pipeline = require(path.join(ROOT, "server", "pipeline.cjs"));
+  // ① 媒体探测:假 wav(扩展名合法但无音轨)→ 上传 400;真 wav → 通过
+  const fake = "----fb" + Math.random().toString(36).slice(2);
+  const fakeBody = Buffer.concat([
+    Buffer.from(`--${fake}\r\nContent-Disposition: form-data; name="file"; filename="fake.wav"\r\nContent-Type: audio/wav\r\n\r\n`),
+    Buffer.from("this is not a real audio container"),
+    Buffer.from(`\r\n--${fake}--\r\n`),
+  ]);
+  const fr = await fetch(BASE + "/api/tasks", { method: "POST", headers: {
+    "Content-Type": `multipart/form-data; boundary=${fake}`, Cookie: cookie,
+    "X-Requested-With": "XMLHttpRequest", "Content-Length": fakeBody.length }, body: fakeBody });
+  const fj = await fr.json().catch(() => ({}));
+  ok("假音频(无音轨)→ 400 明确报错", fr.status === 400 && /音轨/.test(fj.error || ""), `${fr.status} ${JSON.stringify(fj).slice(0, 100)}`);
+
+  // ② 配额求和:造两个文件验证 uploadsUsageBytes 求和(单元级)
+  fs.mkdirSync(path.join(DATA, "uploads"), { recursive: true });
+  fs.writeFileSync(path.join(DATA, "uploads", "q1.bin"), Buffer.alloc(1000, 1));
+  fs.writeFileSync(path.join(DATA, "uploads", "q2.bin"), Buffer.alloc(500, 1));
+  const usage = pipeline.uploadsUsageBytes();
+  const dirList = (() => { try { return fs.readdirSync(path.join(DATA, "uploads")); } catch (e) { return "ERR " + e.message; } })();
+  ok("uploads 占用求和正确(含缓存刷新)", usage >= 1500, `usage=${usage} dir=${JSON.stringify(dirList)} pipelineUploads=${pipeline.UPLOADS} dataEnv=${DATA}`);
+  fs.rmSync(path.join(DATA, "uploads", "q1.bin"), { force: true });
+  fs.rmSync(path.join(DATA, "uploads", "q2.bin"), { force: true });
+
+  // ③ 磁盘水位:statfs 可用且返回正数(真实环境阈值默认 1GB,当前盘未触底)
+  const shortage = pipeline.diskShortage();
+  ok("磁盘水位检查可用且当前未触底", shortage === null, String(shortage));
 });
 
 await section("集成:队列满防线(单元级)与 restart 前置检查顺序", async () => {

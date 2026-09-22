@@ -14,7 +14,7 @@ const { randomUUID } = require("crypto");
 const auth = require("./auth.cjs");
 const { renderMinutes, applyMapToText, applySpeakerMapDeep } = require("./minutes-template.cjs");
 const { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay,
-        DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
+        DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, diskShortage, quotaExceeded, probeHasMediaStream, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
 const { hasKeys } = require("./iflytek.cjs");
 const { writeJsonAtomic, readJsonWithRecovery } = require("./persist.cjs");
 const { assertLlmUrl, hasUsableConfig } = require("./llm.cjs");
@@ -489,8 +489,25 @@ app.get("/api/tasks/:id", (req, res) => {
   t ? res.json(decorateTask(t)) : res.status(404).json({ error: "task not found" });
 });
 
-app.post("/api/tasks", upload.single("file"), (req, res) => {
+/* R18 三轮:上传前资源治理——Content-Length 预检、磁盘水位、总存储配额
+   (在 multer 落盘之前拒绝,不消耗磁盘与带宽) */
+app.post("/api/tasks", (req, res, next) => {
+  const cl = Number(req.headers["content-length"] || 0);
+  if (cl > 2 * 1024 * 1024 * 1024 + 64 * 1024) {
+    return res.status(413).json({ error: "文件超过 2GB 上限" });
+  }
+  const shortage = diskShortage();
+  if (shortage) return res.status(503).json({ error: shortage });
+  const quota = quotaExceeded();
+  if (quota) return res.status(503).json({ error: quota });
+  next();
+}, upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "缺少文件字段 file" });
+  // R18 三轮:媒体内容探测——文件必须含有效音轨(不只看扩展名);无 ffmpeg 的环境跳过
+  if (hasFfmpeg && !probeHasMediaStream(req.file.path)) {
+    try { fs.rmSync(req.file.path); } catch { /* best effort */ }
+    return res.status(400).json({ error: "文件中没有可用的音轨(容器损坏或不是真实音视频文件)" });
+  }
   // R08:队列满则拒绝(在写任何状态/文件引用前;本轮已落盘文件在下方清理)
   if (queueDepth() >= QUEUE_CAPACITY) {
     try { fs.rmSync(req.file.path); } catch { /* best effort */ }

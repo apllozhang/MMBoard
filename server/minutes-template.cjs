@@ -42,6 +42,41 @@ function applySpeakerMapDeep(obj, map) {
   return obj;
 }
 
+/* ── R15 三轮:行动项证据真实性强校验 ──
+ * quote 必须能在转写全文中(去空白后)找到;tref 必须是合法时间范围且与转写 segment 重叠。
+ * 校验结果写入 quoteState/trefState:verified(核验通过)/ unverified(附了但没核验到)/ invalid(格式错)/ none(未附)。
+ * 校验需转写原文上下文,由流水线在分析完成后调用一次并随 analysis.json 持久化。 */
+function verifyActionEvidence(analysis, transcriptText, segments) {
+  const norm = (s) => String(s || "").replace(/\s+/g, "");
+  const text = norm(transcriptText);
+  for (const a of analysis?.actions || []) {
+    a.quoteState = "none";
+    a.trefState = "none";
+    if (a.quote && String(a.quote).trim()) {
+      a.quoteState = text.includes(norm(a.quote)) ? "verified" : "unverified";
+    }
+    const m = a.tref ? /^(\d{1,3}):([0-5]\d)\s*-\s*(\d{1,3}):([0-5]\d)$/.exec(String(a.tref).trim()) : null;
+    if (a.tref && String(a.tref).trim()) {
+      if (!m) { a.trefState = "invalid"; }
+      else {
+        const from = (+m[1]) * 60000 + (+m[2]) * 1000;
+        const to = (+m[3]) * 60000 + (+m[4]) * 1000;
+        const overlap = (segments || []).some((sg) => Number(sg.start) < to && Number(sg.end) > from);
+        a.trefState = overlap ? "verified" : "unverified";
+      }
+    }
+  }
+  return analysis;
+}
+
+/** 行动项证据状态的可读标注(模板内联使用) */
+function evidenceBadge(a) {
+  if (a.quoteState === "unverified") return '<span class="tref-warn">所附原文未在转写中核验到</span>';
+  if (a.trefState === "unverified") return '<span class="tref-warn">所附时间范围未与转写对齐</span>';
+  if (a.trefState === "invalid") return '<span class="tref-warn">所附时间范围格式无法解析</span>';
+  return "";
+}
+
 /** R06/R15:模拟数据、采样覆盖、输出截断——任一情况全程醒目标识(含移动端,不隐藏) */
 function noticeBannerHtml(meta, a) {
   const tags = [];
@@ -188,9 +223,11 @@ ${talk.map((x) => `                <tr><td>${esc(x.speaker)}</td><td class="num"
       </section>` : "";
 
   const actionRows = (a.actions || []).map((x) => {
+    // R15 三轮:证据状态标注——verified 静默;unverified/invalid 明确警示;none 标模型推断
+    const warn = evidenceBadge(x);
     const src = x.quote
-      ? `依据原文:「${esc(x.quote)}」${x.tref ? `(${esc(x.tref)})` : ""}`
-      : `<span class="tref-warn">模型推断,未附原文${x.tref ? `(时间 ${esc(x.tref)})` : ""}</span>`;
+      ? `依据原文:「${esc(x.quote)}」${x.tref ? `(${esc(x.tref)})` : ""}${warn ? " " + warn : ""}`
+      : `<span class="tref-warn">模型推断,未附原文${x.tref ? `(时间 ${esc(x.tref)})${x.trefState && x.trefState !== "none" && x.trefState !== "verified" ? " ⚠ " + warn : ""}` : ""}</span>`;
     return `
           <tr>
             <td>${esc(x.owner || "—")}</td>
@@ -544,4 +581,4 @@ ${hasChart ? `<script>
   };
 }
 
-module.exports = { renderMinutes, applyMapToText, applySpeakerMapDeep };
+module.exports = { renderMinutes, applyMapToText, applySpeakerMapDeep, verifyActionEvidence, evidenceBadge };

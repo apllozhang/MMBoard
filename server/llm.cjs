@@ -136,6 +136,11 @@ async function analyze(transcript, cfg, log = console.log) {
     log("[llm] 未配置 → 明确失败(非 demo 环境禁止静默 mock)");
     throw new Error("LLM 分析未配置(baseUrl/apiKey/model 不完整),且未开启演示模式(MMB_DEMO=1)——拒绝静默生成模拟分析");
   }
+  // R13 三轮:超长转写分块提取(map,逐块全量核对无采样)→ 汇总分析(reduce),
+  // 保证"唯一关键决议位于中段"也能进入纪要(均匀采样只能提高概率,分块提供保证)
+  if (transcript.length > TRANSCRIPT_LIMIT) {
+    return analyzeChunked(transcript, cfg, provider, log);
+  }
   let lastErr;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
@@ -150,59 +155,36 @@ async function analyze(transcript, cfg, log = console.log) {
   throw lastErr;
 }
 
-async function analyzeOnce(transcript, cfg, provider, log = console.log) {
-  await assertLlmUrl(cfg.baseUrl, { allowPrivate: !!cfg.allowPrivate });   // R05:发请求前校验地址
-  samplingTruncatedFlag.value = false;
-  // R05 三轮:解析+校验一次,拿到绑定 IP 的连接地址——后续请求只发往该校验过的 IP
-  const { connectBaseUrl, originalHost, hostname } = await resolveLlmTarget(cfg.baseUrl, {
-    allowPrivate: !!cfg.allowPrivate,
-    allowedHosts: Array.isArray(cfg.allowedHosts) ? cfg.allowedHosts : [],
-  });
-  const ipHost = new URL(connectBaseUrl).hostname;   // 已是校验过的 IP 字面量(IPv6 带方括号)
-  const connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: hostname, hostHeader: originalHost };
-  const { prompt, truncated: samplingTruncated, coverage } = buildPrompt(transcript);
-  const system = "你是专业的会议纪要分析师。只输出 JSON,不要输出任何其他文字。";
-  console.log(`[llm] 模型=${cfg.model} 转写 ${transcript.length} 字 → 提示 ${prompt.length} 字${samplingTruncated ? `(采样覆盖率约 ${coverage}%)` : ""}`);
-
+/** 解析连接目标 + 双协议调用,返回 { content, stopReason, thought }。
+ *  analyzeOnce 与分块 map 共用;空正文/非 2xx 抛错(语义与原内联实现一致)。 */
+async function callLLM(prompt, maxTokens, cfg, connOpts, provider, system, log = console.log) {
+  const base = cfg.__connectBaseUrl || cfg.baseUrl;
   let res, j;
   if (provider === "anthropic") {
-    // Anthropic Messages 协议(智谱 anthropic 兼容端点等)
-    res = await postJson(`${connectBaseUrl.replace(/\/$/, "")}/v1/messages`, {
+    res = await postJson(`${base.replace(/\/$/, "")}/v1/messages`, {
       "x-api-key": cfg.apiKey,
       "anthropic-version": "2023-06-01",
     }, {
-      model: cfg.model,
-      max_tokens: 16384,   // 求同存疑等章节加入后,8192 会被截断(无闭合括号)
-      system,
+      model: cfg.model, max_tokens: maxTokens, system,
       messages: [{ role: "user", content: prompt }],
     }, undefined, connOpts);
     if (res.status < 200 || res.status >= 300) {
       const err = new Error(`LLM API HTTP ${res.status}: ${res.text.slice(0, 200)}`);
-      if (res.status >= 400 && res.status < 500) err.noRetry = true;   // R17:确定性错误不重试
+      if (res.status >= 400 && res.status < 500) err.noRetry = true;
       throw err;
     }
     j = JSON.parse(res.text);
     const content = (j.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("");
     const stopReason = j.stop_reason ?? "-";
     const thought = (j.content ?? []).some((b) => b.type === "thinking");
-    console.log(`[llm] 响应 ${content.length} 字 stop=${stopReason}${thought ? " (含思考块)" : ""}`);
-    if (!content.trim()) {
-      // R17:思考预算耗尽时 GLM 可能正文为空——必须显式失败(触发重试),不能当空串解析
-      throw new Error(`GLM 返回空正文(stop=${stopReason}${thought ? ",仅思考块" : ""})——思考预算耗尽或服务异常`);
-    }
-    // R14:输出结构规范化 + 截断/采样标记(部分结果不得冒充完整纪要)
-    const { obj, partial } = extractJson(content);
-    return { ...normalizeAnalysis(obj), mock: false,
-             partial: partial || (stopReason !== "end_turn" && stopReason !== "-"),
-             samplingTruncated, samplingCoverage: coverage };
+    log(`[llm] 响应 ${content.length} 字 stop=${stopReason}${thought ? " (含思考块)" : ""}`);
+    if (!content.trim()) throw new Error(`GLM 返回空正文(stop=${stopReason}${thought ? ",仅思考块" : ""})——思考预算耗尽或服务异常`);
+    return { content, stopReason, thought };
   }
-
-  // OpenAI 兼容协议
-  res = await postJson(`${connectBaseUrl.replace(/\/$/, "")}/chat/completions`, {
+  res = await postJson(`${base.replace(/\/$/, "")}/chat/completions`, {
     Authorization: `Bearer ${cfg.apiKey}`,
   }, {
-    model: cfg.model,
-    max_tokens: 16384,
+    model: cfg.model, max_tokens: maxTokens,
     messages: [
       { role: "system", content: system },
       { role: "user", content: prompt },
@@ -217,13 +199,117 @@ async function analyzeOnce(transcript, cfg, provider, log = console.log) {
   j = JSON.parse(res.text);
   const content = j.choices?.[0]?.message?.content ?? "";
   const stopReason = j.choices?.[0]?.finish_reason ?? "-";
-  console.log(`[llm] 响应 ${content.length} 字 stop=${stopReason}`);
-  if (!content.trim()) {
-    throw new Error(`GLM 返回空正文(stop=${stopReason})——思考预算耗尽或服务异常`);
+  log(`[llm] 响应 ${content.length} 字 stop=${stopReason}`);
+  if (!content.trim()) throw new Error(`GLM 返回空正文(stop=${stopReason})——思考预算耗尽或服务异常`);
+  return { content, stopReason, thought: false };
+}
+
+/** 按行边界切分超长转写(每块 ≤ size 字) */
+function splitChunks(text, size = 30000) {
+  if (text.length <= size) return [text];
+  const chunks = [];
+  let pos = 0;
+  while (pos < text.length) {
+    let end = Math.min(pos + size, text.length);
+    if (end < text.length) {
+      const nl = text.lastIndexOf("\n", end);
+      if (nl > pos + size * 0.5) end = nl + 1;   // 尽量在行边界切,不撕断句子
+    }
+    chunks.push(text.slice(pos, end));
+    pos = end;
   }
+  return chunks;
+}
+
+/** 分块提取 map:单块关键信息(决议/行动项/要点),逐块全量核对 */
+async function mapChunk(chunk, idx, total, cfg, connOpts, provider, log) {
+  const prompt = `以下是一段超长会议转写的第 ${idx}/${total} 块。请只输出一个 JSON,完整提取本块中的关键信息(本块可能包含唯一的决议或行动项,一个都不要遗漏):
+{"decisions":["达成的决议,每条一句"],"actions":[{"owner":"负责人","item":"事项","due":"时间节点或空串"}],"notes":["其他关键要点,如结论/分工/数字"]}`;
+  const { content } = await callLLM(prompt, 4096, cfg, connOpts, provider,
+    "你是会议纪要信息提取器。只输出 JSON,不要输出任何其他文字。", log);
+  const { obj } = extractJson(content);
+  const strArr = (v) => (Array.isArray(v) ? v.map((x) => String(x)).filter((x) => x.trim()) : []);
+  return {
+    idx,
+    decisions: strArr(obj?.decisions),
+    actions: Array.isArray(obj?.actions) ? obj.actions.filter((a) => a && (a.item || a.owner)) : [],
+    notes: strArr(obj?.notes),
+  };
+}
+
+/** 分块提取主流程:map(逐块)→ reduce(头部原文 + 全部块摘要 + 尾部原文 → 完整纪要) */
+async function analyzeChunked(transcript, cfg, provider, log) {
+  const { connectBaseUrl, originalHost, hostname } = await resolveLlmTarget(cfg.baseUrl, {
+    allowPrivate: !!cfg.allowPrivate,
+    allowedHosts: Array.isArray(cfg.allowedHosts) ? cfg.allowedHosts : [],
+  });
+  const ipHost = new URL(connectBaseUrl).hostname;
+  const connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: hostname, hostHeader: originalHost };
+  const mapCfg = { ...cfg, __connectBaseUrl: connectBaseUrl };
+
+  const chunks = splitChunks(transcript);
+  log(`[llm] 长会分块提取:${chunks.length} 块(每块 ≤30000 字,逐块全量核对,无采样遗漏)`);
+  const summaries = [];
+  for (const [i, chunk] of chunks.entries()) {
+    try {
+      summaries.push(await mapChunk(chunk, i + 1, chunks.length, mapCfg, connOpts, provider, log));
+    } catch (e) {
+      // 单块失败不阻塞汇总,但如实标注该块要点可能缺失
+      log(`[llm] 第 ${i + 1} 块提取失败(该块要点可能缺失): ${e.message}`);
+      summaries.push({ idx: i + 1, decisions: [], actions: [], notes: [`(第 ${i + 1} 块提取失败,内容可能缺失)`] });
+    }
+  }
+  const fmtActions = (acts) => acts.map((a) => `${a.owner || ""}:${a.item || ""}${a.due ? `(${a.due})` : ""}`).join(";") || "无";
+  const summaryText = summaries.map((s) =>
+    `【第 ${s.idx} 块】决议:${s.decisions.join(";") || "无"}\n行动项:${fmtActions(s.actions)}\n要点:${s.notes.join(";") || "无"}`).join("\n\n");
+  const head = transcript.slice(0, 6000);      // 议程/背景原文
+  const tail = transcript.slice(-4000);        // 结论原文
+  const synthetic = `${head}\n[……中段内容已逐块完整核对,以下为各块提取的关键信息,必须纳入纪要对应章节,不得遗漏任何决议与行动项……]\n${summaryText}\n[……中段结束……]\n${tail}`;
+  log(`[llm] 分块汇总:转写 ${transcript.length} 字 → ${chunks.length} 份块摘要 + 头尾原文 ${synthetic.length} 字`);
+
+  let lastErr;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await analyzeOnce(synthetic, cfg, provider, log, attempt);
+    } catch (e) {
+      lastErr = e;
+      if (e.noRetry || attempt === 2) throw e;
+      log(`[llm] 汇总第 1 次调用失败(${String(e.message).slice(0, 80)}),3s 后自动重试`);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+  throw lastErr;
+}
+
+async function analyzeOnce(transcript, cfg, provider, log = console.log) {
+  let connOpts, base = cfg.baseUrl;
+  if (cfg.__connectBaseUrl) {
+    base = cfg.__connectBaseUrl;   // 分块路径:连接目标已由 analyzeChunked 解析并绑定 IP
+  } else {
+    await assertLlmUrl(cfg.baseUrl, { allowPrivate: !!cfg.allowPrivate });   // R05:发请求前校验地址
+    const { connectBaseUrl, originalHost, hostname } = await resolveLlmTarget(cfg.baseUrl, {
+      allowPrivate: !!cfg.allowPrivate,
+      allowedHosts: Array.isArray(cfg.allowedHosts) ? cfg.allowedHosts : [],
+    });
+    base = connectBaseUrl;
+    const ipHost = new URL(connectBaseUrl).hostname;
+    connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: hostname, hostHeader: originalHost };
+  }
+  if (!connOpts) {
+    const ipHost = new URL(base).hostname;
+    connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: hostname || undefined };
+  }
+  const effCfg = { ...cfg, __connectBaseUrl: base };
+  samplingTruncatedFlag.value = false;
+  const { prompt, truncated: samplingTruncated, coverage } = buildPrompt(transcript);
+  const system = "你是专业的会议纪要分析师。只输出 JSON,不要输出任何其他文字。";
+  console.log(`[llm] 模型=${cfg.model} 转写 ${transcript.length} 字 → 提示 ${prompt.length} 字${samplingTruncated ? `(采样覆盖率约 ${coverage}%)` : ""}`);
+
+  const { content, stopReason, thought } = await callLLM(prompt, 16384, effCfg, connOpts, provider, system, log);
+  // R14:输出结构规范化 + 截断/采样标记(部分结果不得冒充完整纪要)
   const { obj, partial } = extractJson(content);
   return { ...normalizeAnalysis(obj), mock: false,
-           partial: partial || (stopReason !== "stop" && stopReason !== "-"),
+           partial: partial || (stopReason !== "end_turn" && stopReason !== "-" && stopReason !== "stop" && stopReason !== "-"),
            samplingTruncated, samplingCoverage: coverage };
 }
 
@@ -244,7 +330,8 @@ function normalizeAnalysis(a) {
     decisions: strArr(a.decisions),
     actions: arr(a.actions).map((x) => ({ owner: str(x.owner), item: str(x.item), due: str(x.due),
                                           quote: typeof x.quote === "string" ? x.quote : "",
-                                          tref: typeof x.tref === "string" ? x.tref : "" })),
+                                          tref: typeof x.tref === "string" ? x.tref : "",
+                                          quoteState: x.quoteState, trefState: x.trefState })),   // R15:证据校验状态随数据保留
     risks: strArr(a.risks),
     highlights: strArr(a.highlights),
     strengths: arr(a.strengths).map((x) => ({
@@ -272,10 +359,12 @@ function normalizeAnalysis(a) {
 /** R13/R15:buildPrompt 是否走了采样(经此标记传入分析结果,供模板标注覆盖范围) */
 const samplingTruncatedFlag = { value: false };
 
+const TRANSCRIPT_LIMIT = 42000;   // 超过即走分块提取(R13 三轮),单次路径不再采样长文
+
 function buildPrompt(transcript) {
   // 长会采样:全量 ≤ LIMIT 直接用;超限保留【开头(议程/背景)+结尾(决议/行动项)】,中段按整行略去。
   // R13:换行搜索限距 2000(稀疏换行/单行长文本不再撑爆预算);组装后仍有硬预算兜底。
-  const LIMIT = 42000, HEAD = 34000, TAIL = 6000, LOOKAHEAD = 2000, MIDDLE_KEEP = 12000;
+  const LIMIT = TRANSCRIPT_LIMIT, HEAD = 34000, TAIL = 6000, LOOKAHEAD = 2000, MIDDLE_KEEP = 12000;
   let input = transcript;
   let truncated = false;
   let coverage = 100;
