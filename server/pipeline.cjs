@@ -75,6 +75,44 @@ function readQuota(day) {
   return readQuotaMap()[day] || 0;
 }
 
+/** 四轮复审 R09:付费转写发起前的额度状态完整性检查——记账文件可读(双坏抛错)且可写。
+ *  不通过则在调用付费服务「之前」中止任务,防止消耗额度却不记账的静默损失。 */
+function assertQuotaReady() {
+  readQuotaMap();   // 双坏/损坏 → 抛明确错误(含"人工修复"指引)
+  try {
+    if (fs.existsSync(QUOTA_FILE)) {
+      fs.closeSync(fs.openSync(QUOTA_FILE, "r+"));   // 可写性探测(不改内容)
+    } else {
+      fs.mkdirSync(path.dirname(QUOTA_FILE), { recursive: true });
+      const probe = `${QUOTA_FILE}.probe-${process.pid}`;
+      fs.writeFileSync(probe, "");
+      fs.rmSync(probe, { force: true });
+    }
+  } catch (e) {
+    throw new Error(`额度记账文件不可写(${QUOTA_FILE}),为防止真实转写未记账,任务已在付费调用前中止;请人工修复额度文件后重试: ${e.message}`);
+  }
+}
+
+/** 真实转写成功后的记账(四轮复审 R09):时长探测 + 记账;任何失败 → 任务显式标记
+ *  quotaRecordFailed 并在转写步骤注明"需人工核对",绝不静默吞掉。 */
+async function recordQuotaAfterTranscribe(taskId, runId, audioPath, log = () => {}, textLen = 0) {
+  try {
+    const secs = await probeAudioSeconds(audioPath);
+    updateTask(taskId, runId, { audioSeconds: secs });
+    recordQuota(secs);
+    if (textLen) setStep(taskId, runId, "transcribe", "done", `${textLen} 字`);
+    return true;
+  } catch (e) {
+    log("额度记账失败(转写已完成,但未计入当日用量,需人工核对):", e.message);
+    try { updateTask(taskId, runId, { quotaRecordFailed: true }); } catch (e2) { if (e2 instanceof RunSupersededError) throw e2; }
+    try {
+      setStep(taskId, runId, "transcribe", "done",
+        `${textLen ? `${textLen} 字、` : ""}⚠额度记账失败——请人工核对额度文件后补记(${String(e.message).slice(0, 80)})`);
+    } catch (e2) { if (e2 instanceof RunSupersededError) throw e2; }
+    return false;
+  }
+}
+
 /** ffprobe 探测音频时长(秒) */
 async function probeAudioSeconds(file) {
   const { stdout } = await execFileAsync("ffprobe",
@@ -179,6 +217,7 @@ function loadSeqHighwater() {
 }
 
 function createTask(storageKey, originalName, sizeBytes) {
+  invalidateUsageCache();   // R18:新文件已落盘,占用缓存立即失效(下次检查重新求和)
   const tasks = loadTasks();
   const d = new Date();
   const day = d.toISOString().slice(0, 10).replace(/-/g, "");
@@ -263,24 +302,72 @@ function diskShortage() {
   return null;
 }
 
-/** 总配额检查:uploads 占用超配额返回提示(达标的返回 null) */
-function quotaExceeded() {
-  if (uploadsUsageBytes() > UPLOADS_QUOTA_BYTES) {
+/** 总配额检查(四轮复审 R18):uploads 占用 + 在途预留 + 本次上传大小一并计入,
+ *  超配额返回提示(达标的返回 null)。并发上传各自预留,不再共享同一个过期缓存值。 */
+function quotaExceeded(incomingBytes = 0) {
+  const projected = uploadsUsageBytes() + reservedUploadBytes + Math.max(0, Number(incomingBytes) || 0);
+  if (projected > UPLOADS_QUOTA_BYTES) {
     return `总存储配额已满(${Math.round(UPLOADS_QUOTA_BYTES / 1073741824)}GB),请清理旧任务后重试`;
   }
   return null;
 }
 
-/** 媒体内容探测:文件必须是可解码的音频/视频容器且含至少一条音轨(不只看扩展名) */
-function probeHasMediaStream(filePath) {
-  try {
-    const out = execFileSync("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", filePath],
-      { timeout: 20000, windowsHide: true });
-    return String(out).trim().length > 0;
-  } catch {
-    return false;
+/* 四轮复审 R18:在途上传预留账本——请求进入时按 Content-Length 预留,结束/中断时释放,
+   解决"并发上传都读到同一个旧缓存值后共同突破配额"的窗口(单实例进程内一致) */
+let reservedUploadBytes = 0;
+function reserveUploadQuota(bytes) {
+  const n = Math.max(0, Number(bytes) || 0);
+  reservedUploadBytes += n;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    reservedUploadBytes = Math.max(0, reservedUploadBytes - n);
+  };
+}
+
+/** 上传落盘/清理后调用:立即失效占用缓存,下一次检查重新求和(消除 60s 窗口内的陈旧值) */
+function invalidateUsageCache() {
+  usageCache = { at: 0, bytes: 0 };
+}
+
+/* 媒体内容探测(四轮复审 R18):ffprobe 移入异步 worker 池(默认并发 2、单次 5s 超时),
+   不再以 execFileSync 阻塞 Node 事件循环;并发恶意的探测请求不会拖垮所有接口 */
+const FFPROBE_CONCURRENCY = Math.max(1, numEnv("MMB_FFPROBE_CONCURRENCY", 2));
+let ffprobeActive = 0;
+const ffprobeQueue = [];
+let ffprobeRun = null;   // 可注入测试 runner(生产为 null → 走真实 ffprobe)
+function ffprobeNext() {
+  while (ffprobeActive < FFPROBE_CONCURRENCY && ffprobeQueue.length) {
+    const job = ffprobeQueue.shift();
+    ffprobeActive++;
+    job().finally(() => { ffprobeActive--; ffprobeNext(); });
   }
 }
+function ffprobeStreams(filePath, timeoutMs) {
+  const run = ffprobeRun
+    ? ffprobeRun(filePath)
+    : execFileAsync("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", filePath],
+        { timeout: timeoutMs, windowsHide: true });
+  return Promise.resolve(run);
+}
+async function probeHasMediaStream(filePath) {
+  return new Promise((resolve) => {
+    const job = async () => {
+      try {
+        const { stdout } = await ffprobeStreams(filePath, 5000);
+        resolve(String(stdout).trim().length > 0);
+      } catch {
+        resolve(false);   // ffprobe 不存在/超时/无法解码 → 一律按无音轨拒绝
+      }
+    };
+    ffprobeQueue.push(job);
+    ffprobeNext();
+  });
+}
+/** 仅测试注入:替换 ffprobe 执行器(null 恢复真实探测);配合 ffprobeActiveCount 观测并发 */
+function _setFfprobeRunnerForTest(fn) { ffprobeRun = fn || null; }
+function ffprobeActiveCount() { return ffprobeActive; }
 
 /** 异步执行流水线(不阻塞 HTTP)。opts.transcript 存在时复用已存转写文本,跳过 extract/transcribe(不耗讯飞额度)。
  *  每次 runId 对应一次执行;任何状态写入前都校验 runId,被新实例取代即静默退出,绝不覆盖新实例状态 */
@@ -345,6 +432,11 @@ async function runFromExtract(task, secret, log) {
     updateTask(task.id, task.runId, { stage: "transcribing" });
     setStep(task.id, task.runId, "transcribe", "running");
     const useLocal = (secret.asr?.provider === "local");
+    // 四轮复审 R09:付费转写(讯飞非 demo)发起前,额度记账状态必须可读且可写——
+    // 双坏/只读时拒绝发起付费调用,防止"消耗了额度却不记账"的静默损失(需人工恢复后重试)
+    if (!useLocal && !(secret.iflytek || {}).demo && process.env.MMB_DEMO !== "1") {
+      assertQuotaReady();
+    }
     const { text, segments, hasSpeakers, mock: trMock } = useLocal
       ? await localAsr.transcribe(audioPath, secret.asr || {}, log)
       : await transcribe(audioPath, secret.iflytek || {}, log);
@@ -352,17 +444,15 @@ async function runFromExtract(task, secret, log) {
     if (!text || text.length < 10) throw new Error("转写结果为空或过短");
     // R06:转写模式入档(mock 数据不得伪装真实纪要)
     const transcriptionMode = useLocal ? "local" : (trMock ? "mock" : "iflytek");
-    setStep(task.id, task.runId, "transcribe", "done", `${text.length} 字${useLocal ? "(本地)" : trMock ? "(mock)" : ""}`);
-    updateTask(task.id, task.runId, { transcriptChars: text.length, transcriptionMode });
 
-    /* 真实转写记账:仅讯飞通道(本地转写不耗额度)。失败不影响任务 */
+    /* 真实转写记账:仅讯飞通道(本地转写不耗额度)。
+       四轮复审 R09:记账失败必须显式标记任务(quotaRecordFailed + 步骤注明人工核对),绝不静默 */
     if (!trMock && !useLocal) {
-      try {
-        const secs = await probeAudioSeconds(audioPath);
-        updateTask(task.id, task.runId, { audioSeconds: secs });
-        recordQuota(secs);
-      } catch (e) { log("额度记账失败(不影响任务):", e.message); }
+      await recordQuotaAfterTranscribe(task.id, task.runId, audioPath, log, text.length);
+    } else {
+      setStep(task.id, task.runId, "transcribe", "done", `${text.length} 字${useLocal ? "(本地)" : trMock ? "(mock)" : ""}`);
     }
+    updateTask(task.id, task.runId, { transcriptChars: text.length, transcriptionMode });
 
     /* 转写落盘:后续"重跑分析"可复用,不必重新转写(省讯飞额度)
        三轮复审 R09:状态文件统一原子持久化 */
@@ -465,4 +555,4 @@ function failTask(task, e) {
   saveTasks(tasks);
 }
 
-module.exports = { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay, readQuota, recordQuota, uploadsUsageBytes, diskShortage, quotaExceeded, probeHasMediaStream, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, AUDIO_EXT, VIDEO_EXT };
+module.exports = { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay, readQuota, recordQuota, assertQuotaReady, recordQuotaAfterTranscribe, uploadsUsageBytes, invalidateUsageCache, reserveUploadQuota, UPLOADS_QUOTA_BYTES, diskShortage, quotaExceeded, probeHasMediaStream, _setFfprobeRunnerForTest, ffprobeActiveCount, DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, AUDIO_EXT, VIDEO_EXT };

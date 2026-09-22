@@ -31,6 +31,8 @@ export interface SettingsPayload {
   version: number;
   activeId: string | null;
   models: ModelEntry[];
+  /** R05 四轮:LLM 内网精确白名单(host 或 host:port,每条一目);内网模型服务必须在此列表内 */
+  allowedLlmHosts: string[];
   asr: AsrConfig;
   iflytek: IflytekConfig;
   /** models 为空时,实际生效的是密钥文件里的配置(兼容既有部署) */
@@ -68,7 +70,7 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const fetchSettings = () => jsonFetch<SettingsPayload>("/api/settings");
 
-export const saveSettings = (p: { version?: number; activeId: string | null; models: ModelEntry[]; asr?: AsrConfig; iflytek?: IflytekConfig }) =>
+export const saveSettings = (p: { version?: number; activeId: string | null; models: ModelEntry[]; asr?: AsrConfig; iflytek?: IflytekConfig; allowedLlmHosts?: string[] }) =>
   jsonFetch<{ ok: boolean; version: number; activeId: string; count: number }>("/api/settings", {
     method: "PUT",
     body: JSON.stringify(p),

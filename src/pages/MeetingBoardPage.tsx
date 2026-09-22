@@ -252,7 +252,17 @@ export default function MeetingBoardPage() {
       header: () => t("board.col.stage"),
       cell: (c) => {
         const s = c.getValue<Stage>();
-        return <Badge tone={STAGE_TONE[s]}>{t(`stage.${s}`)}</Badge>;
+        return (
+          <span className="flex flex-col items-start gap-1">
+            <Badge tone={STAGE_TONE[s]}>{t(`stage.${s}`)}</Badge>
+            {/* R09:真实转写已完成但额度记账失败——显式提示人工核对,不静默 */}
+            {c.row.original.quotaRecordFailed && (
+              <span className="rounded-full border px-1.5 py-0.5 text-[10.5px] leading-tight"
+                    style={{ color: "var(--status-danger-text)", borderColor: "var(--status-danger-text)" }}
+                    title={t("board.quotaFailedTip")}>{t("board.quotaFailed")}</span>
+            )}
+          </span>
+        );
       },
     },
     {

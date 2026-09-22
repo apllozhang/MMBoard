@@ -112,7 +112,9 @@ def check(name, cond, detail=""):
     if not cond: failures.append(f"{name} {detail}".strip())
 
 DATA_DIR = os.path.join(TEST, "verify")
-day = time.strftime("%Y%m%d")
+# 任务编号的日期段为 UTC 口径(与服务端 createTask 的 toISOString 一致);
+# 本地时区在 UTC 0:00-8:00 之间时与本地日期不同(R22 只约定额度走本地时区,编号口径未变)
+day = time.strftime("%Y%m%d", time.gmtime())
 
 # ── R03 前置:匿名与 CSRF ──
 srv = start_server(DATA_DIR)
@@ -218,7 +220,7 @@ try:
     check("R02_uniqueAfterRestart", all(i not in created_ids[:1] and i not in
           (f"MT-{day}-002", f"MT-{day}-003", f"MT-{day}-005") for i in ok_ids))
     check("R02_deletedLatestNotReused", t_new["id"] not in ok_ids, f"deleted={t_new['id']} new={ok_ids}")
-    check("R02_idFormatStable", all(i.startswith(f"MT-{day}-") for i in ok_ids))
+    check("R02_idFormatStable", all(i.startswith(f"MT-{day}-") for i in ok_ids), f"day={day} ids={ok_ids}")
     # 清理本段创建的测试任务
     for tid in created_ids:
         if tid: req(f"/api/tasks/{tid}", method="DELETE", cookie=cookie)

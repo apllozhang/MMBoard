@@ -31,6 +31,7 @@ export interface MeetingTask {
   updatedAt: string;
   hasTranscript?: boolean;    // 转写文本已落盘(可只重跑分析)
   hasSource?: boolean;        // 源文件还在(可整条重跑)
+  quotaRecordFailed?: boolean; // R09:真实转写已完成但额度记账失败,需人工核对额度文件
 }
 
 export interface ServerMeta {

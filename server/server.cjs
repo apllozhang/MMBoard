@@ -14,10 +14,12 @@ const { randomUUID } = require("crypto");
 const auth = require("./auth.cjs");
 const { renderMinutes, applyMapToText, applySpeakerMapDeep } = require("./minutes-template.cjs");
 const { createTask, loadTasks, saveTasks, runPipeline, enqueuePipeline, recoverInterruptedTasks, queueDepth, QUEUE_CAPACITY, taskDir, localDay,
-        DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, diskShortage, quotaExceeded, probeHasMediaStream, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
+        DATA, UPLOADS, OUTPUTS, TASKS_FILE, hasFfmpeg, probeAudioSeconds, readQuota, diskShortage, quotaExceeded, probeHasMediaStream,
+        reserveUploadQuota, AUDIO_EXT, VIDEO_EXT } = require("./pipeline.cjs");
+const localAsr = require("./local.cjs");
 const { hasKeys } = require("./iflytek.cjs");
 const { writeJsonAtomic, readJsonWithRecovery } = require("./persist.cjs");
-const { assertLlmUrl, hasUsableConfig } = require("./llm.cjs");
+const { resolveLlmTarget, postJson, hasUsableConfig } = require("./llm.cjs");
 
 /** 每日转写免费额度基准(秒):讯飞 lfasr 普遍规则为每日约 2 小时,可在 data/settings.json
  *  加 "asrDailyQuotaSeconds": <秒> 覆盖;余量提示始终为本地估算,以讯飞控制台为准 */
@@ -68,11 +70,38 @@ function rateLimit(key, max, windowMs) {
   rateMap.set(key, arr);
   return true;
 }
+// 仅测试环境(MMB_TEST_HOOKS=1,verify_batch_a 注入)暴露限流重置钩子,生产不设置该环境变量
+if (process.env.MMB_TEST_HOOKS === "1") {
+  globalThis.__mmbResetRateLimits = () => rateMap.clear();
+}
 
 /* ── 设置(模型管理,模仿 ZCode:多条目 + 激活其一 + 连通性测试) ── */
+/** 四轮复审 R05:旧全放行布尔 allowPrivateLlmHosts 迁移为精确白名单——
+ *  为 true 且白名单为空时,以当前激活模型的 host(:port) 种入 allowedLlmHosts,
+ *  然后从磁盘文件删除该布尔字段(迁移一次后不再出现)。迁移失败不阻塞启动(内存中已生效)。 */
+function migrateAllowPrivateFlag(st) {
+  if (!st || st.allowPrivateLlmHosts === undefined) return st;
+  const next = { ...st };
+  if (next.allowPrivateLlmHosts === true && !(Array.isArray(next.allowedLlmHosts) && next.allowedLlmHosts.length)) {
+    const act = (next.models || []).find((m) => m.id === next.activeId) || (next.models || [])[0];
+    try {
+      const u = new URL(String(act && act.baseUrl || ""));
+      const entry = `${u.hostname}${u.port ? `:${u.port}` : ""}`;
+      next.allowedLlmHosts = [entry];
+      console.error(`[settings] 已迁移 allowPrivateLlmHosts=true → allowedLlmHosts:["${entry}"](全放行开关已删除)`);
+    } catch { next.allowedLlmHosts = []; }
+  }
+  delete next.allowPrivateLlmHosts;
+  try {
+    fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+    writeJsonAtomic(SETTINGS_FILE, next);
+  } catch { /* 只读等场景:内存中已迁移,下次保存时固化 */ }
+  return next;
+}
+
 function loadSettings() {
   // R09:损坏时回退 .bak;两者皆坏抛错(绝不静默清空配置);ENOENT = 首次运行,返回空配置
-  try { return readJsonWithRecovery(SETTINGS_FILE); }
+  try { return migrateAllowPrivateFlag(readJsonWithRecovery(SETTINGS_FILE)); }
   catch (e) {
     if (e.code === "ENOENT") return { activeId: null, models: [] };
     throw new Error(`设置数据不可读: ${e.message}`);
@@ -103,8 +132,7 @@ function loadSecret() {
   const act = (st.models || []).find((x) => x.id === st.activeId);
   if (act && act.apiKey && act.model && act.baseUrl) {
     s.llm = { provider: act.provider, baseUrl: act.baseUrl, apiKey: act.apiKey, model: act.model,
-              allowPrivate: !!st.allowPrivateLlmHosts,   // R05:旧式全放行开关(已弃用,保留兼容)
-              allowedHosts: Array.isArray(st.allowedLlmHosts) ? st.allowedLlmHosts : [] };   // R05 三轮:精确主机/端口白名单
+              allowedHosts: Array.isArray(st.allowedLlmHosts) ? st.allowedLlmHosts : [] };   // R05 四轮:仅精确白名单(旧布尔已删除)
   }
   /* 转写通道:settings.asr 存在即生效(provider: iflytek | local);讯飞参数 settings 优先 */
   if (st.asr && st.asr.provider) s.asr = { provider: st.asr.provider, localUrl: st.asr.localUrl || "" };
@@ -120,7 +148,6 @@ function loadSecret() {
     s.iflytek = { ...(s.iflytek || {}), demo: true };
     s.llm = { ...(s.llm || {}), demo: true };
   }
-  if (s.llm) s.llm.allowPrivate = !!st.allowPrivateLlmHosts;   // R05:回退路径同样受白名单开关控制
   return s;
 }
 
@@ -307,6 +334,8 @@ app.get("/api/settings", (_req, res) => {
     version: st.version || 0,   // R22:并发编辑保护——保存时回传,不匹配则 409
     activeId: st.activeId || null,
     models: (st.models || []).map((m) => ({ ...m, apiKey: maskKey(m.apiKey) })),
+    // R05 四轮:LLM 内网精确白名单(主机或 host:port 列表;旧布尔开关已迁移删除)
+    allowedLlmHosts: Array.isArray(st.allowedLlmHosts) ? st.allowedLlmHosts : [],
     // 转写通道(iflytek | local)
     asr: { provider: st.asr?.provider === "local" ? "local" : "iflytek", localUrl: st.asr?.localUrl || "" },
     // 讯飞云参数(appId 明文;key/secret 打码;来自 settings 或回退密钥文件)
@@ -357,6 +386,18 @@ app.put("/api/settings", (req, res) => {
   if (asr.provider === "local" && asr.localUrl && !validLocalUrl(asr.localUrl)) {
     return res.status(400).json({ error: "本地服务地址仅允许内网/本机地址(localhost / 10.x / 172.16-31.x / 192.168.x)" });
   }
+  // R05 四轮:白名单条目校验——仅允许 host 或 host:port(拒绝 URL/空格/控制字符),上限 64 条
+  let allowedLlmHosts;
+  if (body.allowedLlmHosts !== undefined) {
+    if (!Array.isArray(body.allowedLlmHosts)) {
+      return res.status(400).json({ error: "allowedLlmHosts 必须是字符串数组(每项为主机或 host:port)" });
+    }
+    const items = body.allowedLlmHosts.map((x) => String(x || "").trim()).filter(Boolean);
+    if (items.length > 64) return res.status(400).json({ error: "allowedLlmHosts 最多 64 条" });
+    const bad = items.find((x) => x.length > 200 || /[\s/\\@?#]/.test(x) || !/^[\w.\-:\[\]]+$/.test(x));
+    if (bad) return res.status(400).json({ error: `白名单条目格式无效:"${bad.slice(0, 40)}"(应为 host 或 host:port,如 127.0.0.1:11434)` });
+    allowedLlmHosts = [...new Set(items)];
+  }
   // 讯飞参数:appId 明文;key/secret 含打码则沿用当前生效值(R05 同款防外送);
   // body 未提交 iflytek 时保留 prev(可能来自回退,首次保存后固化进 settings)
   const eff = effectiveIflytek();
@@ -371,7 +412,9 @@ app.put("/api/settings", (req, res) => {
     return res.status(400).json({ error: "讯飞参数需填写 appId 与 apiSecret(apiKey 可选)" });
   }
   // R22:已知字段更新,保留 settings 里其他字段(如 asrDailyQuotaSeconds);version 递增供并发校验
-  saveSettings({ ...prev, version: (Number(prev.version) || 0) + 1, activeId, models, asr, iflytek });
+  // R05 四轮:allowedLlmHosts 随保存写入(未提交时保留原值)
+  saveSettings({ ...prev, ...(allowedLlmHosts !== undefined ? { allowedLlmHosts } : {}),
+                 version: (Number(prev.version) || 0) + 1, activeId, models, asr, iflytek });
   audit(req, "settings.save", `models=${models.length} asr=${asr.provider} iflytek=${iflytek.appId ? "set" : "empty"}`);
   res.json({ ok: true, version: Number(prev.version || 0) + 1, activeId, count: models.length, asr, iflytek: { appId: iflytek.appId, apiKey: maskKey(iflytek.apiKey), apiSecret: maskKey(iflytek.apiSecret) } });
 });
@@ -392,41 +435,38 @@ app.post("/api/settings/test", async (req, res) => {
     return res.status(400).json({ ok: false, message: "配置不完整(需要 baseUrl / model / apiKey;若未修改密钥请使用已保存条目的测试)" });
   }
   const base = String(cfg.baseUrl).replace(/\/$/, "");
+  const provider = cfg.provider === "anthropic" ? "anthropic" : "openai";
+  const t0 = Date.now();
+  // 四轮复审 R05:测试接口与真实执行路径共用同一套安全请求器——
+  // resolveLlmTarget(DNS 解析一次 + 精确白名单)+ postJson(IP 直连/不跟随重定向),
+  // 杜绝"测试走旧路径,重新解析 DNS + 自动跟随重定向"的旁路
+  let target;
   try {
-    await assertLlmUrl(base, { allowPrivate: !!loadSettings().allowPrivateLlmHosts });
+    const st = loadSettings();
+    target = await resolveLlmTarget(base, {
+      allowedHosts: Array.isArray(st.allowedLlmHosts) ? st.allowedLlmHosts : [],
+    });
   } catch (e) {
     return res.status(400).json({ ok: false, message: e.message });
   }
-  const provider = cfg.provider === "anthropic" ? "anthropic" : "openai";
-  const t0 = Date.now();
   try {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 15000);
-    let r;
-    if (provider === "anthropic") {
-      r = await fetch(`${base}/v1/messages`, {
-        method: "POST", signal: ac.signal,
-        headers: { "Content-Type": "application/json", "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: cfg.model, max_tokens: 8, messages: [{ role: "user", content: "ping" }] }),
-      });
-    } else {
-      r = await fetch(`${base}/chat/completions`, {
-        method: "POST", signal: ac.signal,
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-        body: JSON.stringify({ model: cfg.model, max_tokens: 8, messages: [{ role: "user", content: "ping" }] }),
-      });
-    }
-    clearTimeout(timer);
+    const { connectBaseUrl, originalHost, hostname } = target;
+    const ipHost = new URL(connectBaseUrl).hostname;
+    const connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: hostname, hostHeader: originalHost };
+    const urlPath = provider === "anthropic" ? "/v1/messages" : "/chat/completions";
+    const headers = provider === "anthropic"
+      ? { "Content-Type": "application/json", "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" }
+      : { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` };
+    const body = { model: cfg.model, max_tokens: 8, messages: [{ role: "user", content: "ping" }] };
+    const r = await postJson(`${connectBaseUrl.replace(/\/$/, "")}${urlPath}`, headers, body, 15000, connOpts);
     const ms = Date.now() - t0;
-    if (!r.ok) {
-      const text = (await r.text()).slice(0, 200);
-      return res.json({ ok: false, ms, message: `HTTP ${r.status}: ${text}` });
+    if (r.status < 200 || r.status >= 300) {
+      return res.json({ ok: false, ms, message: `HTTP ${r.status}: ${(r.text || "").slice(0, 200)}` });
     }
-    await r.json().catch(() => null);
     res.json({ ok: true, ms, message: `${provider === "anthropic" ? "Anthropic" : "OpenAI"} 协议连通` });
   } catch (e) {
     const ms = Date.now() - t0;
-    res.json({ ok: false, ms, message: e.name === "AbortError" ? "超时(15s)" : String(e.message).slice(0, 160) });
+    res.json({ ok: false, ms, message: String(e.message).slice(0, 160) });
   }
 });
 
@@ -471,7 +511,8 @@ app.post("/api/settings/test-asr", async (req, res) => {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 8000);
   try {
-    const r = await fetch(String(localUrl).replace(/\/$/, "") + "/health", { signal: ctl.signal });
+    // 四轮复审 R05:与真实本地转写执行路径共用 guardedFetch(内网逐跳校验 + IP 直连 + 禁外网重定向)
+    const r = await localAsr.guardedFetch(String(localUrl).replace(/\/$/, "") + "/health", { signal: ctl.signal });
     if (!r.ok) return res.json({ ok: false, message: `HTTP ${r.status}` });
     const j = await r.json();
     return res.json(j.ok
@@ -489,22 +530,28 @@ app.get("/api/tasks/:id", (req, res) => {
   t ? res.json(decorateTask(t)) : res.status(404).json({ error: "task not found" });
 });
 
-/* R18 三轮:上传前资源治理——Content-Length 预检、磁盘水位、总存储配额
-   (在 multer 落盘之前拒绝,不消耗磁盘与带宽) */
+/* R18 三轮/四轮:上传前资源治理——Content-Length 预检、磁盘水位、总存储配额
+   (在 multer 落盘之前拒绝,不消耗磁盘与带宽)。
+   四轮复审 R18:本次上传大小计入配额判断,并按 Content-Length 进入进程内预留账本,
+   并发上传各自预留,不能共享同一个旧缓存值后共同突破配额;请求结束/中断时释放。 */
 app.post("/api/tasks", (req, res, next) => {
   const cl = Number(req.headers["content-length"] || 0);
   if (cl > 2 * 1024 * 1024 * 1024 + 64 * 1024) {
     return res.status(413).json({ error: "文件超过 2GB 上限" });
   }
+  const release = reserveUploadQuota(cl);
+  res.on("finish", release);
+  res.on("close", release);
   const shortage = diskShortage();
   if (shortage) return res.status(503).json({ error: shortage });
-  const quota = quotaExceeded();
+  const quota = quotaExceeded(cl);
   if (quota) return res.status(503).json({ error: quota });
   next();
-}, upload.single("file"), (req, res) => {
+}, upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "缺少文件字段 file" });
   // R18 三轮:媒体内容探测——文件必须含有效音轨(不只看扩展名);无 ffmpeg 的环境跳过
-  if (hasFfmpeg && !probeHasMediaStream(req.file.path)) {
+  // 四轮复审 R18:ffprobe 走异步 worker 池,不再阻塞事件循环
+  if (hasFfmpeg && !(await probeHasMediaStream(req.file.path))) {
     try { fs.rmSync(req.file.path); } catch { /* best effort */ }
     return res.status(400).json({ error: "文件中没有可用的音轨(容器损坏或不是真实音视频文件)" });
   }

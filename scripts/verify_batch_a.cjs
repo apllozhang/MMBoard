@@ -36,6 +36,7 @@ process.env.MMB_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "mmb-verify-a-"
 process.env.PORT = String(18000 + Math.floor(Math.random() * 2000));
 process.env.MMB_ADMIN_PASSWORD = "VerifyPass-批次A-123";
 process.env.MMB_USAGE_CACHE_MS = "0";   // R18 测试:配额求和禁用缓存,立即反映文件变化
+process.env.MMB_TEST_HOOKS = "1";       // 测试钩子:允许重置限流计数(生产不设置)
 const DATA = process.env.MMB_DATA_DIR;
 
 /* 讯飞 API stub(三轮 R17):真实 HTTP 全链路(prepare/upload/merge/轮询),行为由 iflyStub.mode 控制 */
@@ -94,13 +95,17 @@ function startLlmStub() {
         return res.end(JSON.stringify({ choices: [{ message: { content: "x".repeat(11 * 1024 * 1024) }, finish_reason: "stop" }] }));
       }
       if (state.chunkAware) {
+        // 四轮复审 R13:stub 只允许回传 prompt 中真实出现的标记,禁止按块编号伪造答案
         let content;
+        const seenMarks = () => [...new Set(body.match(/CHUNK-DECISION-MARK-\d+/g) || [])];
         if (body.includes("逐块完整核对")) {
-          const marks = [...new Set(body.match(/CHUNK-DECISION-MARK-\d+/g) || [])];
-          content = JSON.stringify({ title: "T", summary: "S", topics: [], decisions: marks, actions: [], risks: [], highlights: [] });
+          content = JSON.stringify({ title: "T", summary: "S", topics: [], decisions: seenMarks(), actions: [], risks: [], highlights: [] });
+        } else if (state.chunkEmptyIdx != null && new RegExp(`第 ${state.chunkEmptyIdx}/`).test(body)) {
+          content = "";                       // 注入:空响应 → callLLM 必须抛错,该块如实标注缺失
+        } else if (state.chunkBadJsonIdx != null && new RegExp(`第 ${state.chunkBadJsonIdx}/`).test(body)) {
+          content = "这不是JSON输出{{";       // 注入:残缺 JSON → 该块如实标注缺失
         } else {
-          const m = body.match(/第 (\d+)\/(\d+) 块/);
-          content = JSON.stringify({ decisions: [`CHUNK-DECISION-MARK-${m ? m[1] : "0"}`], actions: [], notes: [] });
+          content = JSON.stringify({ decisions: seenMarks(), actions: [], notes: [] });
         }
         res.writeHead(200, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: "stop" }] }));
@@ -221,14 +226,16 @@ await section("A3 讯飞字段契约:appId+apiSecret 两件套,secretKey 别名"
      typeof ex.iflytek.appId === "string" && "apiSecret" in ex.iflytek);
 });
 
-await section("R05 LLM 地址白名单(assertLlmUrl)", async () => {
-  const deny = async (u, opt) => { try { await llm.assertLlmUrl(u, opt); return false; } catch { return true; } };
+await section("R05 LLM 地址白名单(resolveLlmTarget)", async () => {
+  const deny = async (u, opt) => { try { await llm.resolveLlmTarget(u, opt); return false; } catch { return true; } };
   ok("非 http/https 协议拒绝", await deny("ftp://example.com"));
-  ok("云元数据地址无条件拒绝", await deny("http://169.254.169.254/latest/meta-data/", { allowPrivate: true }));
+  ok("云元数据地址无条件拒绝", await deny("http://169.254.169.254/latest/meta-data/"));
   ok("私网地址默认拒绝(127.0.0.1)", await deny("http://127.0.0.1:11434"));
   ok("私网地址默认拒绝(192.168.x)", await deny("http://192.168.1.5:8000"));
-  ok("allowPrivate 显式放行本机模型服务", await llm.assertLlmUrl("http://127.0.0.1:11434", { allowPrivate: true }).then(() => true, () => false));
-  ok("公网字面量 IP 放行", await llm.assertLlmUrl("http://93.184.216.34/v1", { allowPrivate: false }).then(() => true, () => false));
+  // 四轮复审 R05:全放行布尔开关必须删除——旧调用方传 allowPrivate:true 也不得再放行
+  ok("allowPrivate 布尔开关已删除(传入仍拒绝)", await deny("http://127.0.0.1:11434", { allowPrivate: true }));
+  ok("白名单显式放行本机模型服务", await llm.resolveLlmTarget("http://127.0.0.1:11434", { allowedHosts: ["127.0.0.1:11434"] }).then(() => true, () => false));
+  ok("公网字面量 IP 放行", await llm.resolveLlmTarget("http://93.184.216.34/v1", {}).then(() => true, () => false));
   ok("不可解析主机名拒绝", await deny("http://no-such-host.invalid"));
   ok("isPrivateIp 分类正确", llm.isPrivateIp("10.0.0.1") && !llm.isPrivateIp("8.8.8.8") && llm.isPrivateIp("::ffff:127.0.0.1"));
 });
@@ -425,7 +432,7 @@ await section("R05 补充:LLM 非 demo 缺配置明确失败(二轮 §5.4)", asy
 /* ── provider 故障注入(运行期:真实 HTTP stub,真实 postJson/重试/上限逻辑) ── */
 await section("R17 provider 故障注入(stub:429/503/超大响应/成功)", async () => {
   const { srv, state, port } = await startLlmStub();
-  const cfg = { provider: "openai", baseUrl: `http://127.0.0.1:${port}`, apiKey: "stub-key", model: "stub-model", allowPrivate: true };
+  const cfg = { provider: "openai", baseUrl: `http://127.0.0.1:${port}`, apiKey: "stub-key", model: "stub-model", allowedHosts: ["127.0.0.1"] };
   const T = "这是一段用于故障注入的转写文本,长度超过十个字。";
   try {
     state.mode = "ok";
@@ -456,9 +463,9 @@ await section("R17 provider 故障注入(stub:429/503/超大响应/成功)", asy
 await section("speaker canonical 端到端(stub LLM + mock 转写)", async () => {
   const { srv, state, port } = await startLlmStub();
   try {
-    // 设置:讯飞 demo(mock 转写)+ stub LLM(真实调用,非 demo)
+    // 设置:讯飞 demo(mock 转写)+ stub LLM(真实调用,非 demo);内网 stub 以白名单放行
     persist.writeJsonAtomic(path.join(DATA, "settings.json"), {
-      version: 100, activeId: "stub-model-1", allowPrivateLlmHosts: true,
+      version: 100, activeId: "stub-model-1", allowedLlmHosts: ["127.0.0.1"],
       models: [{ id: "stub-model-1", name: "stub", provider: "openai", baseUrl: `http://127.0.0.1:${port}`, model: "stub", apiKey: "stub-key" }],
       asr: { provider: "iflytek", localUrl: "" },
       iflytek: { appId: "stub-app", apiSecret: "stub-secret", demo: true },
@@ -574,7 +581,7 @@ await section("R22 补充:settings/asr 纳入 version 冲突控制(运行期)", 
   await api("PUT", "/api/settings/asr", { provider: "iflytek", version: gj.version });
 });
 
-await section("R05 三轮:精确白名单、IP 直连(关闭 rebinding)、重定向逐跳校验", async () => {
+await section("R05 三轮/四轮:精确白名单、IP 直连、重定向逐跳校验(含设置测试接口贯通)", async () => {
   // ① hostAllowed 精确匹配语义
   ok("白名单精确匹配 host:port", llm.hostAllowed("127.0.0.1", "11434", ["127.0.0.1:11434"]) === true);
   ok("白名单仅 host 时匹配任意端口", llm.hostAllowed("10.0.0.5", "80", ["10.0.0.5"]) === true);
@@ -583,17 +590,32 @@ await section("R05 三轮:精确白名单、IP 直连(关闭 rebinding)、重定
   // ② DNS 解析→IP 绑定:patch dns.lookup 模拟域名解析,连接必须发往解析出的 IP
   const dnsMod = require("dns").promises;
   const origLookup = dnsMod.lookup;
-  const { srv: asrStubSrv, asrHits } = await new Promise((resolve) => {
+  const { srv: asrStubSrv, asrHits, asrPort } = await new Promise((resolve) => {
     const hits = { redir: 0, final: 0 };
     const s = http.createServer((req, res) => {
+      if (req.url === "/health") { res.writeHead(200, { "Content-Type": "application/json" }); return res.end('{"ok":true,"queued":0,"model":"stub-asr"}'); }
       if (req.url === "/redir302-outer") { hits.redir++; res.writeHead(302, { Location: "http://93.184.216.34/evil" }); return res.end(); }
       if (req.url === "/redir302-inner") { hits.redir++; res.writeHead(302, { Location: "/final" }); return res.end(); }
       if (req.url === "/final") { hits.final++; res.writeHead(200, { "Content-Type": "application/json" }); return res.end('{"ok":true}'); }
       res.writeHead(404); res.end();
     });
-    s.listen(0, "127.0.0.1", () => resolve({ srv: s, asrHits: hits, port: s.address().port }));
+    s.listen(0, "127.0.0.1", () => resolve({ srv: s, asrHits: hits, asrPort: s.address().port }));
   });
-  const asrPort = asrStubSrv.address().port;
+  // LLM 测试 stub:记录收到的 Host 头;/redir302 返回 302 指向外部计数端点(重定向不得被跟随)
+  const llmHits = { host: "", redirectTarget: 0 };
+  const { srv: llmTestSrv, port: llmTestPort } = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = ""; req.on("data", (c) => body += c);
+      req.on("end", () => {
+        if (req.url === "/evil-target") { llmHits.redirectTarget++; res.writeHead(200, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ choices: [{ message: { content: "evil" }, finish_reason: "stop" }] })); }
+        llmHits.host = String(req.headers.host || "");
+        if (req.url.startsWith("/redir302")) { res.writeHead(302, { Location: `http://${req.headers.host}/evil-target` }); return res.end(); }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ title: "ok" }) }, finish_reason: "stop" }] }));
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve({ srv: s, port: s.address().port }));
+  });
   const localAsr = require(path.join(ROOT, "server", "local.cjs"));
   try {
     dnsMod.lookup = async (host, opts = {}) => {
@@ -603,17 +625,14 @@ await section("R05 三轮:精确白名单、IP 直连(关闭 rebinding)、重定
       }
       return origLookup(host, opts);
     };
-    // 域名解析到私网且不在白名单、未开 allowPrivate → 拒绝
+    // 域名解析到私网且不在白名单 → 拒绝
     let e1 = "";
     try { await llm.resolveLlmTarget("http://fake-llm.test:9999/v1", {}); } catch (e) { e1 = e.message; }
     ok("解析到私网且无白名单 → 拒绝并提示 allowedLlmHosts", e1.includes("allowedLlmHosts"), e1);
-    // 加入精确白名单 → 通过,连接地址绑定解析 IP
+    // 加入精确白名单 → 通过,连接地址绑定解析 IP 且保留 baseUrl 路径
     const t = await llm.resolveLlmTarget("http://fake-llm.test:9999/v1", { allowedHosts: ["fake-llm.test:9999"] });
-    ok("白名单命中 → 放行且连接地址绑定解析 IP", t.connectBaseUrl === "http://127.0.0.1:9999" && t.originalHost === "fake-llm.test:9999",
+    ok("白名单命中 → 放行且连接绑定解析 IP、保留路径", t.connectBaseUrl === "http://127.0.0.1:9999/v1" && t.originalHost === "fake-llm.test:9999",
        JSON.stringify(t));
-    // 旧式布尔仍兼容
-    const t2 = await llm.resolveLlmTarget("http://fake-llm.test:9999/v1", { allowPrivate: true });
-    ok("allowPrivateLlmHosts 布尔兼容保留", t2.connectBaseUrl === "http://127.0.0.1:9999");
 
     // ③ ASR:重定向到外网被拒;内网 302 正常逐跳跟随(每跳校验)
     let e2 = "";
@@ -625,42 +644,139 @@ await section("R05 三轮:精确白名单、IP 直连(关闭 rebinding)、重定
     let e3 = "";
     try { await localAsr.guardedFetch("http://93.184.216.34/"); } catch (e) { e3 = e.message; }
     ok("ASR 直连非内网地址 → 直接拒绝", e3.includes("不符合内网策略"), e3);
+
+    /* ── 四轮复审 R05:设置测试接口必须复用执行路径的安全请求器(端到端) ── */
+    globalThis.__mmbResetRateLimits?.();   // 前面「限流」用例已耗尽配额,重置后测本节端点
+    // ④ /api/settings/test:白名单未配置 → 拒绝(不得沿旧布尔放行)
+    persist.writeJsonAtomic(path.join(DATA, "settings.json"), {
+      version: 50, activeId: "tm", allowedLlmHosts: [],
+      models: [{ id: "tm", name: "t", provider: "openai", baseUrl: `http://fake-llm.test:${llmTestPort}`, model: "m", apiKey: "k" }],
+      asr: { provider: "iflytek", localUrl: "" },
+    });
+    let tr1 = await api("POST", "/api/settings/test", { id: "tm" });
+    let tj1 = await tr1.json();
+    ok("设置测试:私网域名无白名单 → 400 且提示 allowedLlmHosts", tr1.status === 400 && /allowedLlmHosts/.test(tj1.message || ""),
+       `${tr1.status} ${tj1.message || ""}`);
+    // ⑤ 加入精确白名单(PUT 贯通)→ 测试成功且 stub 收到的 Host 头为原域名(IP 直连生效)
+    let g = await (await api("GET", "/api/settings")).json();
+    const putR = await api("PUT", "/api/settings", {
+      version: g.version, activeId: "tm",
+      models: [{ id: "tm", name: "t", provider: "openai", baseUrl: `http://fake-llm.test:${llmTestPort}`, model: "m", apiKey: "k" }],
+      allowedLlmHosts: [`fake-llm.test:${llmTestPort}`],
+    });
+    ok("PUT settings 保存 allowedLlmHosts 白名单", putR.status === 200, `${putR.status} ${JSON.stringify(await putR.json().catch(() => ({}))).slice(0, 120)}`);
+    g = await (await api("GET", "/api/settings")).json();
+    ok("GET settings 回读 allowedLlmHosts", JSON.stringify(g.allowedLlmHosts) === JSON.stringify([`fake-llm.test:${llmTestPort}`]),
+       JSON.stringify(g.allowedLlmHosts));
+    const badPut = await api("PUT", "/api/settings", { version: g.version, activeId: null, models: [], allowedLlmHosts: ["a b", "http://x/y"] });
+    ok("白名单非法条目(空格/URL)→ 400", badPut.status === 400, String(badPut.status));
+    const tr2 = await api("POST", "/api/settings/test", { id: "tm" });
+    const tj2 = await tr2.json();
+    ok("设置测试:白名单命中 → ok 且 Host 头保留原域名(连接绑定解析 IP)", tr2.status === 200 && tj2.ok === true && llmHits.host === `fake-llm.test:${llmTestPort}`,
+       `${tr2.status} ${JSON.stringify(tj2).slice(0, 100)} host=${llmHits.host}`);
+    // ⑥ 设置测试:LLM 302 重定向 → 不得跟随(外部目标计数为 0)
+    persist.writeJsonAtomic(path.join(DATA, "settings.json"), {
+      version: 60, activeId: "tm", allowedLlmHosts: [`fake-llm.test:${llmTestPort}`],
+      models: [{ id: "tm", name: "t", provider: "openai", baseUrl: `http://fake-llm.test:${llmTestPort}/redir302`, model: "m", apiKey: "k" }],
+      asr: { provider: "iflytek", localUrl: "" },
+    });
+    const tr3 = await api("POST", "/api/settings/test", { id: "tm" });
+    const tj3 = await tr3.json();
+    ok("设置测试:LLM 302 → 不跟随(ok:false),外部目标零命中", tj3.ok === false && llmHits.redirectTarget === 0,
+       `${JSON.stringify(tj3).slice(0, 100)} target=${llmHits.redirectTarget}`);
+    // ⑦ 旧布尔迁移:settings.json 含 allowPrivateLlmHosts:true + 空白名单 → 加载时迁移为当前 baseUrl 的白名单条目并删除布尔
+    persist.writeJsonAtomic(path.join(DATA, "settings.json"), {
+      version: 70, activeId: "tm", allowPrivateLlmHosts: true,
+      models: [{ id: "tm", name: "t", provider: "openai", baseUrl: `http://fake-llm.test:${llmTestPort}`, model: "m", apiKey: "k" }],
+      asr: { provider: "iflytek", localUrl: "" },
+    });
+    const mig = await (await api("GET", "/api/settings")).json();
+    ok("旧布尔迁移:GET 返回种子白名单且不再含布尔", Array.isArray(mig.allowedLlmHosts) && mig.allowedLlmHosts.length === 1 && mig.allowedLlmHosts[0].includes("fake-llm.test"),
+       JSON.stringify(mig.allowedLlmHosts));
+    const onDisk = JSON.parse(fs.readFileSync(path.join(DATA, "settings.json"), "utf8"));
+    ok("旧布尔迁移:磁盘文件已删除 allowPrivateLlmHosts 字段", !("allowPrivateLlmHosts" in onDisk) && Array.isArray(onDisk.allowedLlmHosts),
+       JSON.stringify(Object.keys(onDisk)));
+    const tr4 = await api("POST", "/api/settings/test", { id: "tm" });
+    ok("旧布尔迁移:迁移后的白名单对测试接口生效", tr4.status === 200 && (await tr4.json()).ok === true, String(tr4.status));
+
+    // ⑧ /api/settings/test-asr:302 → 外网被拒(不得跟随);内网链路正常
+    persist.writeJsonAtomic(path.join(DATA, "settings.json"), {
+      version: 80, activeId: null, models: [], allowedLlmHosts: [],
+      asr: { provider: "local", localUrl: `http://127.0.0.1:${asrPort}` },
+    });
+    const ta1 = await api("POST", "/api/settings/test-asr", { localUrl: `http://127.0.0.1:${asrPort}/redir302-outer` });
+    const tj4 = await ta1.json();
+    ok("test-asr:302 → 外网被拒(ok:false,请求器逐跳校验拦截)", tj4.ok === false, JSON.stringify(tj4).slice(0, 100));
+    const ta2 = await api("POST", "/api/settings/test-asr", { localUrl: `http://127.0.0.1:${asrPort}` });
+    const tj5 = await ta2.json();
+    ok("test-asr:内网 /health 正常探测", tj5.ok === true, JSON.stringify(tj5).slice(0, 100));
   } finally {
     dnsMod.lookup = origLookup;
     asrStubSrv.close();
+    llmTestSrv.close();
   }
 });
 
-await section("R13 三轮:分块提取(map/reduce),中段唯一决议可提取", async () => {
+await section("R13 三/四轮:分块提取(map/reduce),中段唯一决议可提取且分块原文真实入 prompt", async () => {
   const { srv: chunkSrv, state, port } = await startLlmStub();
-  try {
-    state.chunkAware = true;
-    // ~54000 字转写:唯一决议标记埋在第 2 块中段(约 39000 字处)
+  const mkTranscript = (totalLines, markLine) => {
     const lines = [];
-    for (let i = 0; i < 1200; i++) {
-      lines.push(i === 900
+    for (let i = 0; i < totalLines; i++) {
+      lines.push(i === markLine
         ? `第${i}行:经过讨论,会议决定采用 CHUNK-DECISION-MARK-2 特殊方案,由张三负责推进落实。`
         : `第${i}行:常规讨论内容,无关键决策,仅为占位填充文本,保证转写总长度超过分块阈值。`);
     }
-    const transcript = lines.join("\n");
-    const cfg = { provider: "openai", baseUrl: `http://127.0.0.1:${port}`, apiKey: "stub-key", model: "stub", allowPrivate: true };
+    return lines.join("\n");
+  };
+  try {
+    state.chunkAware = true;
+    // ── 主用例:~54000 字 2 块,唯一决议标记埋在第 2 块中段 ──
+    const cfg = { provider: "openai", baseUrl: `http://127.0.0.1:${port}`, apiKey: "stub-key", model: "stub", allowedHosts: ["127.0.0.1"] };
     state.prompts.length = 0;
-    const r = await llm.analyze(transcript, cfg, () => {});
-    const mapCalls = state.prompts.filter((p) => /第 \d+\/\d+ 块/.test(p)).length;   // map prompt 含「第 n/N 块」
-    ok(`分块提取:54000 字触发 2 次 map + 1 次 reduce(实际 ${state.prompts.length} 次请求)`, state.prompts.length === 3,
-       `requests=${state.prompts.length}`);
+    const r = await llm.analyze(mkTranscript(1200, 900), cfg, () => {});
+    const mapPrompts = state.prompts.filter((p) => /第 \d+\/\d+ 块/.test(p));
+    ok("分块提取:54000 字触发 2 次 map + 1 次 reduce", state.prompts.length === 3 && mapPrompts.length === 2,
+       `requests=${state.prompts.length} maps=${mapPrompts.length}`);
+    ok("map#1 prompt 含第 1 块真实原文(不含第 2 块标记)", mapPrompts[0].includes("第0行:常规讨论内容") && !mapPrompts[0].includes("CHUNK-DECISION-MARK-2"),
+       `len=${mapPrompts[0].length} hasMark=${mapPrompts[0].includes("CHUNK-DECISION-MARK-2")}`);
+    ok("map#2 prompt 含中段标记原文(第 900 行)", mapPrompts[1].includes("CHUNK-DECISION-MARK-2 特殊方案") && mapPrompts[1].includes("第900行"),
+       `hasMark=${mapPrompts[1].includes("CHUNK-DECISION-MARK-2")}`);
     const lastPrompt = state.prompts[state.prompts.length - 1];
     ok("reduce 输入包含中段块提取的决议标记", lastPrompt.includes("CHUNK-DECISION-MARK-2"));
-    ok("最终结果纳入中段决议", (r.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r.decisions));
+    ok("最终结果纳入中段决议(stub 仅按真实原文回传)", (r.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r.decisions));
     ok("分块为全量核对,不再标注采样截断", r.samplingTruncated === false, `samplingTruncated=${r.samplingTruncated}`);
-    ok("map 请求确实为 2 块", mapCalls === 2, `mapCalls=${mapCalls}`);
+
+    // ── 单块空响应:该块如实标注缺失,其余块正常 ──
+    state.chunkEmptyIdx = 1; state.prompts.length = 0;
+    const r2 = await llm.analyze(mkTranscript(1200, 900), cfg, () => {});
+    ok("map 空响应:任务完成但第 1 块标注提取失败", state.prompts[state.prompts.length - 1].includes("第 1 块提取失败"));
+    ok("map 空响应:第 2 块决议仍进入最终结果", (r2.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r2.decisions));
+    state.chunkEmptyIdx = null;
+
+    // ── 单块坏 JSON:标记所在块失败 → 决议如实丢失(不伪造) ──
+    state.chunkBadJsonIdx = 2; state.prompts.length = 0;
+    const r3 = await llm.analyze(mkTranscript(1200, 900), cfg, () => {});
+    ok("map 残缺 JSON:第 2 块标注提取失败", state.prompts[state.prompts.length - 1].includes("第 2 块提取失败"));
+    ok("map 残缺 JSON:中段决议不伪造进入结果", !(r3.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r3.decisions));
+    state.chunkBadJsonIdx = null;
+
+    // ── 三块会议:唯一标记在中段(第 2/3 块),前后块不得误含 ──
+    state.prompts.length = 0;
+    const r4 = await llm.analyze(mkTranscript(2000, 1150), cfg, () => {});
+    const map4 = state.prompts.filter((p) => /第 \d+\/\d+ 块/.test(p));
+    ok("92000 字触发 3 次 map + 1 次 reduce", state.prompts.length === 4 && map4.length === 3, `requests=${state.prompts.length}`);
+    ok("三块:仅第 2 块 prompt 含标记,1/3 块不含", !map4[0].includes("CHUNK-DECISION-MARK-2") && map4[1].includes("CHUNK-DECISION-MARK-2") && !map4[2].includes("CHUNK-DECISION-MARK-2"),
+       map4.map((m) => m.includes("CHUNK-DECISION-MARK-2")).join(","));
+    ok("三块:中段决议进入最终结果", (r4.decisions || []).some((d) => d.includes("CHUNK-DECISION-MARK-2")), JSON.stringify(r4.decisions));
   } finally {
     state.chunkAware = false;
+    state.chunkEmptyIdx = null;
+    state.chunkBadJsonIdx = null;
     chunkSrv.close();
   }
 });
 
-await section("R15 三轮:行动项证据真实性强校验(quote/tref 与转写比对)", async () => {
+await section("R15 三/四轮:行动项证据强校验(quote 与 tref 绑定同一片段)", async () => {
   const tmpl = require(path.join(ROOT, "server", "minutes-template.cjs"));
   const text = "[00:00] 说话人0: 我们决定采用新方案。\n[01:00] 说话人1: 张三周五前完成评审。";
   const segments = [{ start: 0, end: 30000, text: "我们决定采用新方案。", speaker: "0" },
@@ -671,22 +787,36 @@ await section("R15 三轮:行动项证据真实性强校验(quote/tref 与转写
       { owner: "B", item: "伪造证据", quote: "这段话并不存在于转写中XYZQ", tref: "99:99-99:99" },
       { owner: "C", item: "无证据" },
       { owner: "D", item: "仅时间格式非法", tref: "99:99-99:99" },
+      // 四轮复审 R15:quote 真实但来自另一时间段 → 必须整体判未核验
+      { owner: "E", item: "跨范围引用", quote: "张三周五前完成评审。", tref: "00:00-00:30" },
+      { owner: "F", item: "起止颠倒", quote: "我们决定采用新方案。", tref: "00:30-00:00" },
+      { owner: "G", item: "超出音频边界", quote: "我们决定采用新方案。", tref: "59:00-59:30" },
+      { owner: "H", item: "仅引用无时间", quote: "张三周五前完成评审。" },
     ] });
   tmpl.verifyActionEvidence(analysis, text, segments);
-  const [a1, a2, a3] = analysis.actions;
-  ok("真实 quote + 合法重叠 tref → verified", a1.quoteState === "verified" && a1.trefState === "verified",
+  const [a1, a2, a3, a4, a5, a6, a7, a8] = analysis.actions;
+  ok("真实 quote + 合法重叠 tref → 双 verified", a1.quoteState === "verified" && a1.trefState === "verified",
      JSON.stringify([a1.quoteState, a1.trefState]));
   ok("假 quote → unverified;非法 tref → invalid", a2.quoteState === "unverified" && a2.trefState === "invalid",
      JSON.stringify([a2.quoteState, a2.trefState]));
   ok("未附证据 → none(模型推断口径不变)", a3.quoteState === "none" && a3.trefState === "none");
-  const rendered = tmpl.renderMinutes({
-    analysis,
+  ok("四轮:quote 真实但不在 tref 范围内 → quoteState unverified", a5.quoteState === "unverified" && a5.trefState === "verified",
+     JSON.stringify([a5.quoteState, a5.trefState]));
+  ok("四轮:起止颠倒(from≥to)→ trefState invalid", a6.trefState === "invalid", a6.trefState);
+  ok("四轮:时间范围超出音频边界 → trefState unverified", a7.trefState === "unverified", a7.trefState);
+  ok("四轮:仅 quote 无 tref → 全文核验回退仍可用", a8.quoteState === "verified" && a8.trefState === "none",
+     JSON.stringify([a8.quoteState, a8.trefState]));
+  const renderWith = (actions) => tmpl.renderMinutes({
+    analysis: { ...(analysis), actions: llm.normalizeAnalysis({ title: "T", summary: "S", actions }).actions },
     meta: { date: "2026-09-22", uploadedAt: "2026-09-22T01:00:00Z", generatedAt: "2026-09-22T02:00:00Z",
             fileName: "x.mp3", transcriptChars: 100, talkStats: [] },
-  });
-  ok("渲染:伪造 quote 显示「未在转写中核验到」警示", rendered.html.includes("所附原文未在转写中核验到"));
-  ok("渲染:非法 tref 显示「无法解析」警示", rendered.html.includes("时间范围格式无法解析"));
-  ok("渲染:真实证据不带警示", !rendered.html.includes("所附时间范围未与转写对齐"));
+  }).html;
+  ok("渲染:伪造 quote 显示「未在转写中核验到」警示", renderWith([analysis.actions[1]]).includes("所附原文未在转写中核验到"));
+  ok("渲染:非法/颠倒 tref 显示解析或起止警示", renderWith([analysis.actions[3]]).includes("无法解析")
+     && renderWith([analysis.actions[5]]).includes("起止颠倒"));
+  ok("渲染:跨范围引用显示「原文未落在所附时间范围内」", renderWith([analysis.actions[4]]).includes("原文未落在所附时间范围内"));
+  ok("渲染:超音频边界显示「未与转写对齐」", renderWith([analysis.actions[6]]).includes("所附时间范围未与转写对齐"));
+  ok("渲染:真实证据不带任何警示", !/<span class="tref-warn"/.test(renderWith([{ owner: "A", item: "真实证据", quote: "我们决定采用新方案。", tref: "00:00-00:30" }])));
 });
 
 await section("R17 三轮:讯飞轮询分类重试(stub 真实 HTTP 全链路)", async () => {
@@ -749,6 +879,126 @@ await section("R18 三轮:媒体内容探测与资源治理", async () => {
   // ③ 磁盘水位:statfs 可用且返回正数(真实环境阈值默认 1GB,当前盘未触底)
   const shortage = pipeline.diskShortage();
   ok("磁盘水位检查可用且当前未触底", shortage === null, String(shortage));
+
+  /* ── 四轮复审 R18:配额预留账本(并发安全)+ incoming 计入 ── */
+  pipeline.invalidateUsageCache();
+  const qBase = pipeline.quotaExceeded(0);
+  ok("当前 uploads 占用远低于配额(默认 20GB)", qBase === null, String(qBase));
+  const Q = pipeline.UPLOADS_QUOTA_BYTES;
+  const usageNow = pipeline.uploadsUsageBytes();
+  const releaseA = pipeline.reserveUploadQuota(Q - usageNow - 1024);   // 预留到仅剩 1KB 余量
+  ok("预留后:incoming 计入判断(2KB 即超额)", pipeline.quotaExceeded(2048) !== null, String(pipeline.quotaExceeded(2048)));
+  ok("预留后:不上传不超额(incoming=0)", pipeline.quotaExceeded(0) === null, String(pipeline.quotaExceeded(0)));
+  releaseA();
+  ok("释放预留后恢复", pipeline.quotaExceeded(0) === null, String(pipeline.quotaExceeded(0)));
+  const releaseB = pipeline.reserveUploadQuota(Q);   // 恶意并发:预留直接占满
+  try {
+    const body503 = "--zz--";
+    const q503 = await fetch(BASE + "/api/tasks", { method: "POST", headers: {
+      "Content-Type": "multipart/form-data; boundary=zz", Cookie: cookie, "X-Requested-With": "XMLHttpRequest",
+      "Content-Length": Buffer.byteLength(body503) }, body: body503 });
+    ok("预留占满 → 另一个 HTTP 上传请求被 503 拒绝", q503.status === 503, String(q503.status));
+  } finally {
+    releaseB();   // 无论断言结果如何必须释放,否则污染后续用例的配额判断
+  }
+
+  /* ── 四轮复审 R18:ffprobe 异步化 + 并发上限(事件循环不被阻塞) ── */
+  let active = 0, maxActive = 0;
+  pipeline._setFfprobeRunnerForTest(async () => {
+    active++; maxActive = Math.max(maxActive, active);
+    await new Promise((r) => setTimeout(r, 120));
+    active--;
+    return { stdout: "0\n" };
+  });
+  const tAsyncStart = Date.now();
+  const probeResults = await Promise.all(Array.from({ length: 5 }, () => pipeline.probeHasMediaStream("whatever.wav")));
+  ok("5 个并发探测全部异步完成且返回音轨存在", probeResults.length === 5 && probeResults.every(Boolean),
+     JSON.stringify(probeResults) + ` 耗时=${Date.now() - tAsyncStart}ms`);
+  ok("ffprobe 并发上限 ≤ 2(worker 池生效)", maxActive <= 2, `max=${maxActive}`);
+  pipeline._setFfprobeRunnerForTest(null);
+  fs.mkdirSync(path.join(DATA, "uploads"), { recursive: true });
+  fs.writeFileSync(path.join(DATA, "uploads", "real-check.wav"), makeWav(2));
+  const probeReal = await pipeline.probeHasMediaStream(path.join(DATA, "uploads", "not-exist.wav"));
+  const probeReal2 = await pipeline.probeHasMediaStream(path.join(DATA, "uploads", "real-check.wav"));
+  ok("真实 wav 异步探测:含音轨 → true(不存在文件 → false)", probeReal === false && probeReal2 === true,
+     `fake=${probeReal} real=${probeReal2}`);
+  fs.rmSync(path.join(DATA, "uploads", "real-check.wav"), { force: true });
+});
+
+await section("R09 四轮:额度损坏在付费转写前 fail-closed(真流水线 + 讯飞 stub)", async () => {
+  const pipeline = require(path.join(ROOT, "server", "pipeline.cjs"));
+  globalThis.__mmbResetRateLimits?.();   // 上传限流(6/分钟)与前面用例共用计数,先重置
+  const { srv: r09LlmSrv, port: r09LlmPort } = await startLlmStub();
+  const waitTask = async (id) => {
+    let f = null;
+    for (let i = 0; i < 90; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      f = await (await api("GET", `/api/tasks/${id}`)).json();
+      if (f.stage === "done" || f.stage === "failed") break;
+    }
+    return f;
+  };
+  const upload = async (name) => {
+    const b = "----qb" + Math.random().toString(36).slice(2);
+    const body = Buffer.concat([
+      Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\nContent-Type: audio/wav\r\n\r\n`),
+      makeWav(2), Buffer.from(`\r\n--${b}--\r\n`),
+    ]);
+    const r = await fetch(BASE + "/api/tasks", { method: "POST", headers: {
+      "Content-Type": `multipart/form-data; boundary=${b}`, Cookie: cookie, "X-Requested-With": "XMLHttpRequest",
+      "Content-Length": body.length }, body });
+    return r.json();
+  };
+  try {
+    // 讯飞真实通道(demo:false)+ LLM 指向 stub(白名单放行)
+    persist.writeJsonAtomic(path.join(DATA, "settings.json"), {
+      version: 300, activeId: "m1", allowedLlmHosts: ["127.0.0.1"],
+      models: [{ id: "m1", name: "stub", provider: "openai", baseUrl: `http://127.0.0.1:${r09LlmPort}`, model: "stub", apiKey: "k" }],
+      asr: { provider: "iflytek", localUrl: "" },
+      iflytek: { appId: "stub-app", apiSecret: "stub-secret", demo: false },
+    });
+    iflyStub.mode = "ok9"; iflyStub.progressCount = 0; iflyStub.requests.length = 0;
+    const quotaFile = path.join(DATA, "quota.json");
+    fs.rmSync(quotaFile, { force: true }); fs.rmSync(quotaFile + ".bak", { force: true });
+
+    // ① 额度健康:任务完成且真实记账
+    const t1 = await upload("quota-ok.wav");
+    ok("上传成功(健康额度)", t1 && t1.id, JSON.stringify(t1).slice(0, 120));
+    const f1 = await waitTask(t1.id);
+    ok("额度健康:讯飞真实通道任务完成", f1 && f1.stage === "done", JSON.stringify(f1?.error || f1?.stage).slice(0, 160));
+    ok("额度健康:当日额度已记账(>0 秒)", pipeline.readQuota(pipeline.localDay()) > 0, String(pipeline.readQuota(pipeline.localDay())));
+    ok("付费调用确实发生(stub 收到 prepare/上传/轮询请求)", iflyStub.requests.length >= 2, `requests=${iflyStub.requests.length}`);
+    ok("健康路径不标记记账失败", f1 && f1.quotaRecordFailed !== true, String(f1 && f1.quotaRecordFailed));
+
+    // ② 额度双坏:下一个任务必须在发起付费转写「之前」失败(stub 请求数零增长)
+    const reqBefore = iflyStub.requests.length;
+    fs.writeFileSync(quotaFile, "{{{corrupt-not-json");
+    try { fs.writeFileSync(quotaFile + ".bak", "{{{corrupt-not-json"); } catch { /* 无备份文件 */ }
+    const t2 = await upload("quota-bad.wav");
+    const f2 = await waitTask(t2.id);
+    ok("额度损坏:任务明确失败且提示人工恢复", f2 && f2.stage === "failed" && /额度/.test(f2.error || "") && /人工/.test(f2.error || ""),
+       JSON.stringify(f2?.error || f2?.stage).slice(0, 200));
+    ok("额度损坏:未发起任何付费调用(stub 请求数不变)", iflyStub.requests.length === reqBefore,
+       `before=${reqBefore} after=${iflyStub.requests.length}`);
+
+    // ③ 转写成功后记账失败的显式标记(单元级,不重跑付费调用)
+    const fakeTask = { id: "quota-mark-1", runId: "r1", stage: "done", steps: [
+      { key: "transcribe", label: "语音转写", status: "done", startedAt: "t", finishedAt: "t", note: "100 字" },
+    ], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    pipeline.saveTasks([fakeTask, ...pipeline.loadTasks()]);
+    const wavPath = path.join(DATA, "uploads", "quota-mark.wav");
+    fs.mkdirSync(path.join(DATA, "uploads"), { recursive: true });
+    fs.writeFileSync(wavPath, makeWav(2));
+    await pipeline.recordQuotaAfterTranscribe("quota-mark-1", "r1", wavPath, () => {});
+    const marked = pipeline.loadTasks().find((x) => x.id === "quota-mark-1");
+    ok("记账失败:任务标记 quotaRecordFailed 且步骤注明人工核对", marked && marked.quotaRecordFailed === true
+       && /人工/.test((marked.steps.find((s) => s.key === "transcribe") || {}).note || ""),
+       JSON.stringify({ flag: marked && marked.quotaRecordFailed, note: marked && (marked.steps.find((s) => s.key === "transcribe") || {}).note }));
+    fs.rmSync(wavPath, { force: true });
+  } finally {
+    r09LlmSrv.close();
+    iflyStub.mode = "ok9";
+  }
 });
 
 await section("集成:队列满防线(单元级)与 restart 前置检查顺序", async () => {

@@ -12,9 +12,9 @@ const http = require("http");
 const net = require("net");
 const dns = require("dns").promises;
 
-/* ── R05(三轮复审 §7-2):LLM 地址精确白名单 + IP 直连,关闭 DNS rebinding 窗口 ──
+/* ── R05(三轮复审 §7-2 / 四轮复审):LLM 地址精确白名单 + IP 直连,关闭 DNS rebinding 窗口 ──
  * · settings.allowedLlmHosts:精确主机/端口列表(如 ["127.0.0.1:11434","10.0.0.5"]),
- *   列表命中者放行私网;旧配置 allowPrivateLlmHosts: true 仍兼容(全放行,已弃用)。
+ *   仅列表命中者放行私网;旧的全放行布尔开关 allowPrivateLlmHosts 已删除(加载时自动迁移,见 server.cjs)。
  * · 云元数据地址(169.254.169.254 / *metadata*)无条件拒绝。
  * · resolveLlmTarget 解析 DNS 后返回绑定 IP 的连接地址与原始 Host——连接只发往校验过的 IP,
  *   不存在"校验一次解析、连接再解析"的 rebinding 时间窗;https 保留 servername 做 SNI 证书校验。
@@ -44,7 +44,7 @@ function hostAllowed(hostname, port, allowedHosts = []) {
 }
 
 /** 解析并校验 LLM 地址,返回 { connectBaseUrl, originalHost }——connectBaseUrl 的 host 为校验过的 IP */
-async function resolveLlmTarget(urlStr, { allowPrivate = false, allowedHosts = [] } = {}) {
+async function resolveLlmTarget(urlStr, { allowedHosts = [] } = {}) {
   let u;
   try { u = new URL(String(urlStr)); } catch { throw new Error("LLM 地址格式无效"); }
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("LLM 地址仅允许 http/https 协议");
@@ -61,19 +61,14 @@ async function resolveLlmTarget(urlStr, { allowPrivate = false, allowedHosts = [
     throw new Error("LLM 地址指向云元数据端点,无条件拒绝");
   }
   const hasPrivate = addrs.some(isPrivateIp);
-  if (hasPrivate && !explicitlyAllowed && !allowPrivate) {
+  if (hasPrivate && !explicitlyAllowed) {
     throw new Error("LLM 地址解析到内网/保留地址,已拒绝;如确需内网模型服务,请在 settings.json 的 allowedLlmHosts 列表中加入该主机(如 \"127.0.0.1:11434\")");
   }
-  // IP 直连:连接只发往校验过的地址,消除 rebinding 窗口;Host 头与 https servername 保留原主机
+  // IP 直连:连接只发往校验过的地址,消除 rebinding 窗口;Host 头与 https servername 保留原主机。
+  // 四轮复审:保留 baseUrl 的 path/query——带路径的接口(如 /api/anthropic、/v1)不得被丢弃
   const ipLiteral = addrs[0].includes(":") ? `[${addrs[0]}]` : addrs[0];
-  const connectBaseUrl = `${u.protocol}//${ipLiteral}${u.port ? `:${u.port}` : ""}`;
+  const connectBaseUrl = `${u.protocol}//${ipLiteral}${u.port ? `:${u.port}` : ""}${u.pathname}${u.search}`;
   return { connectBaseUrl, originalHost: u.host, hostname: u.hostname, resolvedIp: addrs[0], explicitlyAllowed };
-}
-
-/** 兼容旧调用名:仅做校验(不返回绑定地址) */
-async function assertLlmUrl(urlStr, opts = {}) {
-  await resolveLlmTarget(urlStr, opts);
-  return true;
 }
 
 /** POST JSON,空闲超时默认 20 分钟,返回 {status, text}。
@@ -221,9 +216,14 @@ function splitChunks(text, size = 30000) {
   return chunks;
 }
 
-/** 分块提取 map:单块关键信息(决议/行动项/要点),逐块全量核对 */
+/** 分块提取 map:单块关键信息(决议/行动项/要点),逐块全量核对。
+ *  四轮复审 R13:分块原文必须完整进入 prompt——模型只对它真实看到的文本负责。 */
 async function mapChunk(chunk, idx, total, cfg, connOpts, provider, log) {
-  const prompt = `以下是一段超长会议转写的第 ${idx}/${total} 块。请只输出一个 JSON,完整提取本块中的关键信息(本块可能包含唯一的决议或行动项,一个都不要遗漏):
+  const prompt = `以下是一段超长会议转写的第 ${idx}/${total} 块(本块原文全文如下,共 ${chunk.length} 字)。请只基于这段原文,输出一个 JSON,完整提取本块中的关键信息(本块可能包含唯一的决议或行动项,一个都不要遗漏;原文中没有的不要编造):
+<本块原文>
+${chunk}
+</本块原文>
+输出格式(只输出 JSON,不要任何其他文字):
 {"decisions":["达成的决议,每条一句"],"actions":[{"owner":"负责人","item":"事项","due":"时间节点或空串"}],"notes":["其他关键要点,如结论/分工/数字"]}`;
   const { content } = await callLLM(prompt, 4096, cfg, connOpts, provider,
     "你是会议纪要信息提取器。只输出 JSON,不要输出任何其他文字。", log);
@@ -240,12 +240,11 @@ async function mapChunk(chunk, idx, total, cfg, connOpts, provider, log) {
 /** 分块提取主流程:map(逐块)→ reduce(头部原文 + 全部块摘要 + 尾部原文 → 完整纪要) */
 async function analyzeChunked(transcript, cfg, provider, log) {
   const { connectBaseUrl, originalHost, hostname } = await resolveLlmTarget(cfg.baseUrl, {
-    allowPrivate: !!cfg.allowPrivate,
     allowedHosts: Array.isArray(cfg.allowedHosts) ? cfg.allowedHosts : [],
   });
   const ipHost = new URL(connectBaseUrl).hostname;
   const connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: hostname, hostHeader: originalHost };
-  const mapCfg = { ...cfg, __connectBaseUrl: connectBaseUrl };
+  const mapCfg = { ...cfg, __connectBaseUrl: connectBaseUrl, __serverName: hostname, __hostHeader: originalHost };
 
   const chunks = splitChunks(transcript);
   log(`[llm] 长会分块提取:${chunks.length} 块(每块 ≤30000 字,逐块全量核对,无采样遗漏)`);
@@ -282,22 +281,20 @@ async function analyzeChunked(transcript, cfg, provider, log) {
 }
 
 async function analyzeOnce(transcript, cfg, provider, log = console.log) {
-  let connOpts, base = cfg.baseUrl;
+  let connOpts, base;
   if (cfg.__connectBaseUrl) {
-    base = cfg.__connectBaseUrl;   // 分块路径:连接目标已由 analyzeChunked 解析并绑定 IP
+    // 分块路径:连接目标已由 analyzeChunked 解析并绑定 IP(SNI/Host 随 mapCfg 透传)
+    base = cfg.__connectBaseUrl;
+    const ipHost = new URL(base).hostname;
+    connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: cfg.__serverName, hostHeader: cfg.__hostHeader };
   } else {
-    await assertLlmUrl(cfg.baseUrl, { allowPrivate: !!cfg.allowPrivate });   // R05:发请求前校验地址
+    // R05:发请求前解析并校验地址(校验与连接同一 IP,无二次解析窗口)
     const { connectBaseUrl, originalHost, hostname } = await resolveLlmTarget(cfg.baseUrl, {
-      allowPrivate: !!cfg.allowPrivate,
       allowedHosts: Array.isArray(cfg.allowedHosts) ? cfg.allowedHosts : [],
     });
     base = connectBaseUrl;
     const ipHost = new URL(connectBaseUrl).hostname;
     connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: hostname, hostHeader: originalHost };
-  }
-  if (!connOpts) {
-    const ipHost = new URL(base).hostname;
-    connOpts = { connectIp: ipHost.replace(/^\[|\]$/g, ""), serverName: hostname || undefined };
   }
   const effCfg = { ...cfg, __connectBaseUrl: base };
   samplingTruncatedFlag.value = false;
@@ -499,4 +496,4 @@ function mockAnalysis(transcript) {
   };
 }
 
-module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson, assertLlmUrl, resolveLlmTarget, isPrivateIp, hostAllowed, hasUsableConfig };   // 供回归测试
+module.exports = { analyze, buildPrompt, normalizeAnalysis, extractJson, resolveLlmTarget, postJson, isPrivateIp, hostAllowed, hasUsableConfig };   // 供回归测试

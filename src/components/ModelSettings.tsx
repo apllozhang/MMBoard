@@ -85,12 +85,14 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
   }, [t]);
   useEffect(() => { load(); }, [load]);
 
-  const persist = async (next: { activeId: string | null; models: ModelEntry[]; asr?: AsrConfig; iflytek?: IflytekConfig }, okMsg?: string) => {
+  const persist = async (next: { activeId: string | null; models: ModelEntry[]; asr?: AsrConfig; iflytek?: IflytekConfig; allowedLlmHosts?: string[] }, okMsg?: string) => {
     setBusy(true);
     try {
       // R22:回传当前 version,另一窗口已保存过时服务端返回 409(避免整份覆盖)
       const r = await saveSettings({ version: payload?.version, ...next });
-      setPayload((p) => (p ? { ...p, version: r.version, activeId: r.activeId, models: next.models, asr: next.asr ?? p.asr, iflytek: (r as { iflytek?: IflytekConfig }).iflytek ?? p.iflytek } : p));
+      setPayload((p) => (p ? { ...p, version: r.version, activeId: r.activeId, models: next.models,
+        asr: next.asr ?? p.asr, iflytek: (r as { iflytek?: IflytekConfig }).iflytek ?? p.iflytek,
+        allowedLlmHosts: next.allowedLlmHosts ?? p.allowedLlmHosts } : p));
       if (okMsg) toast("success", okMsg);
       window.dispatchEvent(new CustomEvent("mmb-settings-changed"));   // R21:通知看板立即刷新通道状态 meta
       return true;
@@ -165,6 +167,16 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
     const activeId = payload.activeId === id ? (models[0]?.id || null) : payload.activeId;
     setPendingDel(null);
     await persist({ activeId, models }, t("settings.deleted"));
+  };
+
+  /** R05 四轮:内网 LLM 精确白名单(host 或 host:port,每行一条)——替代旧的全放行布尔开关 */
+  const [hostsDraft, setHostsDraft] = useState<string | null>(null);
+  const hostsText = hostsDraft ?? (payload?.allowedLlmHosts || []).join("\n");
+  const saveHosts = async () => {
+    if (!payload) return;
+    const list = hostsText.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
+    const ok = await persist({ activeId: payload.activeId, models: payload.models, allowedLlmHosts: list }, t("settings.saved"));
+    if (ok) setHostsDraft(null);
   };
 
   /** 转写通道:asr(讯飞/本地)+ 讯飞云参数,两者独立于 AI 分析模型配置 */
@@ -298,6 +310,21 @@ function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
           </div>
         </div>
       )}
+
+      {/* R05 四轮:内网模型白名单(精确主机/端口,替代全放行开关) */}
+      <div className="mt-4 rounded-[10px] border p-3" style={{ borderColor: "var(--color-border)" }}>
+        <div className="text-[13px] font-bold text-heading">{t("settings.hostsTitle")}</div>
+        <p className="m-0 mt-0.5 text-[12px] text-text-muted">{t("settings.hostsHint")}</p>
+        <textarea className={cn(inputCls, "mt-1.5 min-h-[64px] font-mono text-[12.5px]")} rows={3}
+                  aria-label={t("settings.hostsTitle")}
+                  value={hostsText}
+                  placeholder={"127.0.0.1:11434\n10.0.0.5:8000"}
+                  onChange={(e) => setHostsDraft(e.target.value)} />
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button type="button" className="btn btn-secondary btn-sm" disabled={busy || hostsDraft === null}
+                  onClick={saveHosts}>{t("settings.hostsSave")}</button>
+        </div>
+      </div>
 
       {/* 转写通道(讯飞云/本地):与 AI 分析模型相互独立 */}
       <div className="mt-4 rounded-[10px] border p-3" style={{ borderColor: "var(--color-border)" }}>
