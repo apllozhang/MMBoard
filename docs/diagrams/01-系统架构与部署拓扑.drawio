@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="ZCode">
+  <diagram id="arch01" name="系统架构与部署拓扑">
+    <mxGraphModel dx="1200" dy="700" grid="1" gridSize="10" page="1" pageWidth="1500" pageHeight="560">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="browser" value="管理员浏览器&lt;br&gt;React SPA(Vite 构建)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="220" width="170" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="sw_host" value="生产主机 10.20.30.203(Docker)" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="260" y="40" width="880" height="460" as="geometry"/>
+        </mxCell>
+        <mxCell id="sw_container" value="Docker 容器 ale-symphony-console(:8099)" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#6c8ebf;" vertex="1" parent="sw_host">
+          <mxGeometry x="20" y="50" width="580" height="380" as="geometry"/>
+        </mxCell>
+        <mxCell id="m_server" value="server.cjs&lt;br&gt;路由/鉴权/CSRF/限流/审计" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="sw_container">
+          <mxGeometry x="30" y="50" width="210" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="m_auth" value="auth.cjs&lt;br&gt;bcrypt 口令/会话令牌" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="sw_container">
+          <mxGeometry x="330" y="50" width="210" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="m_pipeline" value="pipeline.cjs&lt;br&gt;串行队列/状态机/额度/资源" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="sw_container">
+          <mxGeometry x="30" y="120" width="210" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="m_persist" value="persist.cjs&lt;br&gt;原子写/.bak 恢复" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="sw_container">
+          <mxGeometry x="330" y="120" width="210" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="m_llm" value="llm.cjs&lt;br&gt;双协议/分块/证据校验" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="sw_container">
+          <mxGeometry x="30" y="190" width="210" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="m_template" value="minutes-template.cjs&lt;br&gt;ALE 渲染/横幅/警示" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="sw_container">
+          <mxGeometry x="330" y="190" width="210" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="m_ifly" value="iflytek.cjs&lt;br&gt;lfasr 签名/分片/轮询" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="sw_container">
+          <mxGeometry x="30" y="260" width="210" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="m_local" value="local.cjs&lt;br&gt;guardedFetch(内网逐跳)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="sw_container">
+          <mxGeometry x="330" y="260" width="210" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="vol" value="数据卷 data/&lt;br&gt;uploads / outputs / *.json" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;size=15;" vertex="1" parent="sw_host">
+          <mxGeometry x="640" y="180" width="200" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ext_ifly" value="讯飞云 lfasr&lt;br&gt;(每日免费额度)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="110" width="210" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="ext_llm" value="LLM 服务&lt;br&gt;公网云 / 内网白名单服务" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="240" width="210" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="ext_fun" value="本地 FunASR 工作机&lt;br&gt;10.10.10.144:8300" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="370" width="210" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" value="HTTP :8099 /api(会话 Cookie + CSRF 头)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="browser" target="sw_container">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" value="签名/分片/轮询(瞬态退避重试)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="m_ifly" target="ext_ifly">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" value="resolveLlmTarget + postJson(IP 直连/白名单/不跟随重定向)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="m_llm" target="ext_llm">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" value="guardedFetch(/health→提交→轮询)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="m_local" target="ext_fun">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" value="原子写 + .bak 主备" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="m_persist" target="vol">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" value="任务状态/转写/分析落盘" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;" edge="1" parent="1" source="m_pipeline" target="vol">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

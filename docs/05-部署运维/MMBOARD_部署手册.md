@@ -18,6 +18,8 @@
 
 ## 2. 一次发布(deploy.cjs 自动执行的全流程)
 
+> 配图:`../diagrams/06-发布与回滚流程.drawio`(打开方式见 `../diagrams/README.md`)
+
 ```
 node deploy/deploy.cjs          # 在开发机仓库根目录执行(DEPLOY_HOST/DEPLOY_PORT 可覆盖目标)
 ```

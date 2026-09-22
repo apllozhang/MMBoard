@@ -9,6 +9,8 @@
 
 ## 1. 任务状态机与执行模型
 
+> 配图:`../diagrams/02-任务状态机.drawio`(打开方式见 `../diagrams/README.md`)
+
 ### 1.1 状态与步骤
 
 ```
@@ -68,6 +70,8 @@ OpenAI 兼容:`POST {base}/chat/completions`,Bearer 鉴权;Anthropic:`POST {base
 
 ### 3.3 分块提取(>42000 字,R13/F01)
 
+> 配图:`../diagrams/05-LLM分块与完整性保障.drawio`
+
 ```
 splitChunks(text, 30000)        按行边界切(不撕断句子),每块 ≤30000 字
 mapChunkWithRetry               每块:prompt 含 <本块原文> 全文与字数,
@@ -117,6 +121,8 @@ analyzeChunked                  逐块 map → 失败块记入 chunkFailures[{in
 - 适用:tasks/settings/auth/quota/seq-highwater/analysis.json/transcript.json 全部状态文件。
 
 ## 7. 上传四道防线与资源边界(R18)
+
+> 配图:`../diagrams/04-上传四道防线.drawio`
 
 顺序(multer 落盘**之前**,不消耗磁盘带宽):
 

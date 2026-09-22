@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="ZCode">
+  <diagram id="flow03" name="端到端任务流水线">
+    <mxGraphModel dx="1100" dy="700" grid="1" gridSize="10" page="1" pageWidth="1300" pageHeight="1900">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="u1" value="上传 POST /api/tasks(multipart,单文件 ≤2GB)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="460" y="40" width="300" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="f1" value="四道防线:CL&gt;2GB→413;磁盘&lt;1GB→503;配额(占用+预留+本次)→503;媒体探测无音轨→400" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="430" y="140" width="360" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="c1" value="落盘 uploads/{uuid} → createTask(高水位编号,dirKey=uuid)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="460" y="250" width="300" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="q1" value="入串行队列(容量 10,满→503)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="460" y="350" width="300" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ex" value="extract:ffmpeg → 16kHz 单声道 mp3(无 ffmpeg 跳过)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="460" y="450" width="300" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r_route" value="asr.provider?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="550" width="280" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="flyC" value="讯飞通道(耗额度)" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="120" y="700" width="380" height="240" as="geometry"/>
+        </mxCell>
+        <mxCell id="fly1" value="assertQuotaReady(记账可读可写,双坏→任务失败)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="flyC">
+          <mxGeometry x="20" y="45" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="fly2" value="签名 → 分片上传 → merge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="flyC">
+          <mxGeometry x="20" y="90" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="fly3" value="轮询(瞬态≤5 次指数退避;业务码立即失败)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="flyC">
+          <mxGeometry x="20" y="135" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="fly4" value="记账 recordQuota(失败→quotaRecordFailed)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="flyC">
+          <mxGeometry x="20" y="180" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="locC" value="本地 FunASR(免费)" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="760" y="700" width="380" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="loc1" value="guardedFetch:/health → 提交 → 轮询(连续 3 次失败判负)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="locC">
+          <mxGeometry x="20" y="45" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="loc2" value="工作机 worker 转码/识别(不阻塞主服务)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="locC">
+          <mxGeometry x="20" y="90" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="loc3" value="结果与临时文件 TTL 清理" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="locC">
+          <mxGeometry x="20" y="135" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="chk" value="转写结果校验(&lt;10 字 → 失败)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="460" y="900" width="300" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="a_route" value="&gt;42000 字?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1000" width="280" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="chunkC" value="分块 map/reduce" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="120" y="1130" width="380" height="300" as="geometry"/>
+        </mxCell>
+        <mxCell id="ck1" value="splitChunks(行边界,30000 字/块)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="chunkC">
+          <mxGeometry x="20" y="45" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="ck2" value="map 逐块(prompt 含本块原文;瞬态重试 1 次)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="chunkC">
+          <mxGeometry x="20" y="90" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="ck3" value="失败块 → chunkFailures + 占位" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="chunkC">
+          <mxGeometry x="20" y="135" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="ck4" value="reduce:头 6000 + 块摘要 + 尾 4000" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="chunkC">
+          <mxGeometry x="20" y="180" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="ck5" value="chunkFailures 非空 → 强制 partial=true" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="chunkC">
+          <mxGeometry x="20" y="225" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="singleC" value="单次调用" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="760" y="1130" width="380" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="sg1" value="analyzeOnce(失败 3s 后重试一次)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="singleC">
+          <mxGeometry x="20" y="45" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="sg2" value="4xx noRetry 立即失败" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="singleC">
+          <mxGeometry x="20" y="90" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="sg3" value="空正文 → 明确报错(防思考预算耗尽被当成功)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="singleC">
+          <mxGeometry x="20" y="135" width="330" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="norm" value="normalizeAnalysis(缺字段 → missingFields/partial)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="460" y="1460" width="300" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ver" value="verifyActionEvidence(quote ∈ tref 片段核验)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="460" y="1560" width="300" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ren" value="render:ALE HTML(完整性横幅/证据警示/说话人映射)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="460" y="1660" width="300" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="done" value="done(纪要可下载)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d8;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="460" y="1770" width="300" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="failed" value="failed(error 含人工指引)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="830" y="1770" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="u1" target="f1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="f1" target="c1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="c1" target="q1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="q1" target="ex">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="ex" target="r_route">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" value="iflytek" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="r_route" target="flyC">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e7" value="local" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="r_route" target="locC">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="flyC" target="chk">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="locC" target="chk">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="chk" target="a_route">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e11" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="a_route" target="chunkC">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e12" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="a_route" target="singleC">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="chunkC" target="norm">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="singleC" target="norm">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="norm" target="ver">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="ver" target="ren">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e17" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="ren" target="done">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e18" value="空转写/外部故障/确认性错误" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;" edge="1" parent="1" source="chk" target="failed">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

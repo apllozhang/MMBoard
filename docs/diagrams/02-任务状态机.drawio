@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="ZCode">
+  <diagram id="state02" name="任务状态机">
+    <mxGraphModel dx="1100" dy="600" grid="1" gridSize="10" page="1" pageWidth="1180" pageHeight="460">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="note1" value="串行队列容量 10(满则拒绝);runId 取代机制:重跑生成新 runId,旧执行在任何状态写入前作废" style="text;html=1;align=left;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="720" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_queued" value="queued" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="180" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_extract" value="extracting" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="220" y="180" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_trans" value="transcribing" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="400" y="180" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_anal" value="analyzing" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="580" y="180" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_rend" value="rendering" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="760" y="180" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_done" value="done" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d8;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="940" y="180" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_failed" value="failed( error 含人工指引 )" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="440" y="340" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" value="抽音轨(ffmpeg,无则 skipped)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="s_queued" target="s_extract">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" value="转写(讯飞 | 本地)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="s_extract" target="s_trans">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" value="分析(分块 | 单次)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="s_trans" target="s_anal">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" value="渲染(ALE HTML)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="s_anal" target="s_rend">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="s_rend" target="s_done">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="f1" value="出错" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="s_extract" target="s_failed">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="f2" value="出错" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="s_trans" target="s_failed">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="f3" value="出错" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="s_anal" target="s_failed">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="f4" value="出错" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="s_rend" target="s_failed">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="rr1" value="重跑(整条 / 仅分析·新 runId)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;" edge="1" parent="1" source="s_done" target="s_queued">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="rr2" value="重跑" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;" edge="1" parent="1" source="s_failed" target="s_queued">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
