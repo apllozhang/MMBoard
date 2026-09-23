@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="ZCode">
+  <diagram id="backup13" name="备份与恢复流程">
+    <mxGraphModel dx="1100" dy="700" grid="1" gridSize="10" page="1" pageWidth="680" pageHeight="700">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="lane1" value="备份(建议每周 + 重要会议后按需)" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="580" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="b1" value="生产机:docker run alpine&lt;br&gt;tar czf 整个数据卷" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane1">
+          <mxGeometry x="20" y="45" width="250" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="b2" value="备份物:mmboard-data-YYYY-MM-DD.tgz&lt;br&gt;(tasks/纪要/设置/认证/额度全量)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d8;strokeColor=#82b366;" vertex="1" parent="lane1">
+          <mxGeometry x="310" y="45" width="250" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="b3" value="另需登记:deploy.secret.json(密码管理器保存)、镜像 ID 台账(每次发布)" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="lane1">
+          <mxGeometry x="20" y="130" width="540" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane2" value="恢复(整卷)" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="40" y="270" width="580" height="330" as="geometry"/>
+        </mxCell>
+        <mxCell id="r1" value="① docker stop ale-symphony-console" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane2">
+          <mxGeometry x="20" y="45" width="250" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r2" value="② 清空数据卷 → 解包备份(tar 回卷)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane2">
+          <mxGeometry x="310" y="45" width="250" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r3" value="③ docker start …" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane2">
+          <mxGeometry x="20" y="140" width="250" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r4" value="④ 验证:/api/version + 登录 +&lt;br&gt;任务列表与纪要抽查" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d8;strokeColor=#82b366;" vertex="1" parent="lane2">
+          <mxGeometry x="310" y="140" width="250" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r5" value="注意:auth.json 随备份恢复——口令回到备份时点;.corrupt 隔离文件留档分析后清理;恢复演练建议每季度一次(测试机)" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="lane2">
+          <mxGeometry x="20" y="230" width="540" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="lane1" source="b1" target="b2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="lane2" source="r1" target="r2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="lane2" source="r2" target="r3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="lane2" source="r3" target="r4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

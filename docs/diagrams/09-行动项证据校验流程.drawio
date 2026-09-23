@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="ZCode">
+  <diagram id="evd09" name="行动项证据校验流程">
+    <mxGraphModel dx="1100" dy="700" grid="1" gridSize="10" page="1" pageWidth="1250" pageHeight="820">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="start" value="行动项&lt;br&gt;{quote, tref}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="150" width="150" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="d1" value="tref 有值?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="250" y="140" width="200" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="d2" value="格式 mm:ss-mm:ss?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="510" y="140" width="200" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="d3" value="from ≥ to?(起止颠倒)" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="770" y="140" width="210" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="inv" value="trefState=invalid" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="150" width="170" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="d4" value="to &gt; 音频末段结束?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="510" y="280" width="200" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="unv" value="trefState=unverified" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="780" y="300" width="180" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="seg" value="取重叠 segments(start &lt; to 且 end &gt; from)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="510" y="410" width="200" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="d5" value="quote ∈ 重叠片段文本?(去空白)" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="500" y="530" width="220" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="vv" value="quoteState=verified&lt;br&gt;trefState=verified" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d8;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="290" y="660" width="200" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="qq" value="quoteState=unverified&lt;br&gt;警示「原文未落在所附时间范围内」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="550" y="650" width="260" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="whole" value="quote 全文核验回退&lt;br&gt;(trefState=none)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="250" y="300" width="200" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="note" value="evidenceBadge 优先级:跨范围引用→「所附原文未落在所附时间范围内」;假原文→「所附原文未在转写中核验到」;invalid→「无法解析或起止颠倒」;unverified→「未与转写对齐」。校验结果随 analysis.json 持久化,纯重渲染不丢失。" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="860" y="410" width="370" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="start" target="d1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d1" target="whole">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d1" target="d2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d2" target="inv">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d2" target="d3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d3" target="inv">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e7" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d3" target="d4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d4" target="unv">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e9" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d4" target="seg">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="seg" target="d5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e11" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d5" target="vv">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e12" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d5" target="qq">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

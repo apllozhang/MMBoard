@@ -9,7 +9,9 @@
 
 ## 1. 任务状态机与执行模型
 
-> 配图:`../diagrams/02-任务状态机.drawio`(打开方式见 `../diagrams/README.md`)
+![任务状态机](../diagrams/svg/02-任务状态机.svg)
+
+> 编辑源:`../diagrams/02-任务状态机.drawio`
 
 ### 1.1 状态与步骤
 
@@ -70,7 +72,9 @@ OpenAI 兼容:`POST {base}/chat/completions`,Bearer 鉴权;Anthropic:`POST {base
 
 ### 3.3 分块提取(>42000 字,R13/F01)
 
-> 配图:`../diagrams/05-LLM分块与完整性保障.drawio`
+![LLM 分块与完整性保障](../diagrams/svg/05-LLM分块与完整性保障.svg)
+
+> 编辑源:`../diagrams/05-LLM分块与完整性保障.drawio`
 
 ```
 splitChunks(text, 30000)        按行边界切(不撕断句子),每块 ≤30000 字
@@ -91,6 +95,10 @@ analyzeChunked                  逐块 map → 失败块记入 chunkFailures[{in
 
 ### 3.5 行动项证据校验(R15)
 
+![行动项证据校验流程](../diagrams/svg/09-行动项证据校验流程.svg)
+
+> 编辑源:`../diagrams/09-行动项证据校验流程.drawio`
+
 `verifyActionEvidence(analysis, transcript, segments)`(分析完成后调用,状态随 analysis.json 持久化):
 - 解析 `tref`(mm:ss-mm:ss):格式非法或 `from>=to` → `invalid`;超出音频末段结束时间 → `unverified`;
 - 取与 [from,to) 重叠的 segments,**仅在这些片段文本中**核验 quote(去空白匹配);
@@ -104,6 +112,10 @@ analyzeChunked                  逐块 map → 失败块记入 chunkFailures[{in
 ## 5. 额度记账与高水位(R09/R22/R02)
 
 ### 5.1 额度
+
+![额度记账与 fail-closed](../diagrams/svg/10-额度记账与fail-closed.svg)
+
+> 编辑源:`../diagrams/10-额度记账与fail-closed.drawio`
 
 - 记账文件 `quota.json`:`{"YYYY-MM-DD": 秒}`,日期为**本地自然日**(与讯飞控制台口径对齐);每日免费额度默认 2 小时,`asrDailyQuotaSeconds` 可覆盖。
 - **付费调用前** `assertQuotaReady()`:主备可读(readQuotaMap,双坏抛明确错误)+ 可写性探测(r+ 打开/目录探针);失败则任务在 transcribe 前失败,错误含「人工修复」指引——绝不"先消耗额度再补记"。
@@ -122,7 +134,9 @@ analyzeChunked                  逐块 map → 失败块记入 chunkFailures[{in
 
 ## 7. 上传四道防线与资源边界(R18)
 
-> 配图:`../diagrams/04-上传四道防线.drawio`
+![上传四道防线](../diagrams/svg/04-上传四道防线.svg)
+
+> 编辑源:`../diagrams/04-上传四道防线.drawio`
 
 顺序(multer 落盘**之前**,不消耗磁盘带宽):
 
@@ -134,6 +148,10 @@ analyzeChunked                  逐块 map → 失败块记入 chunkFailures[{in
 6. 队列满/上传限流(6 次/分/IP)/建任务失败 → 清理本次落盘文件。
 
 ## 8. 安全设计(R03/R04/R05/R12)
+
+![认证与会话安全流程](../diagrams/svg/07-认证与会话安全流程.svg)
+
+> 编辑源:`../diagrams/07-认证与会话安全流程.drawio`
 
 | 机制 | 设计 |
 |---|---|

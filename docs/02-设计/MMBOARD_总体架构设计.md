@@ -9,7 +9,9 @@
 
 ## 1. 架构总览
 
-> 配图:`../diagrams/01-系统架构与部署拓扑.drawio`(打开方式见 `../diagrams/README.md`)
+![系统架构与部署拓扑](../diagrams/svg/01-系统架构与部署拓扑.svg)
+
+> 编辑源:`../diagrams/01-系统架构与部署拓扑.drawio`(打开方式见 `../diagrams/README.md`)
 
 单机单实例三层结构:浏览器 SPA ↔ Node/Express 单进程服务 ↔ 外部服务(LLM 云/内网、讯飞云、本地 FunASR 工作机)。无数据库,状态全部为数据目录内的 JSON 文件(原子持久化);无消息队列,任务为进程内串行队列。
 
@@ -62,7 +64,9 @@
 
 ### 4.1 任务流水线(主流程)
 
-> 配图:`../diagrams/03-端到端任务流水线.drawio`
+![端到端任务流水线](../diagrams/svg/03-端到端任务流水线.svg)
+
+> 编辑源:`../diagrams/03-端到端任务流水线.drawio`
 
 ```
 上传(multipart)→ 四道防线(413/水位/配额/媒体探测)→ 落盘 uploads/{uuid}.{ext}

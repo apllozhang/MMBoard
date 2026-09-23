@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="ZCode">
+  <diagram id="conc08" name="设置并发控制时序">
+    <mxGraphModel dx="1100" dy="700" grid="1" gridSize="10" page="1" pageWidth="1160" pageHeight="640">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="lfA" value="窗口 A" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;size=40;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="140" y="40" width="140" height="500" as="geometry"/>
+        </mxCell>
+        <mxCell id="lfS" value="服务端 /api/settings" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;size=40;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="510" y="40" width="180" height="500" as="geometry"/>
+        </mxCell>
+        <mxCell id="lfB" value="窗口 B" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;size=40;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="880" y="40" width="140" height="500" as="geometry"/>
+        </mxCell>
+        <mxCell id="m1" value="① GET /api/settings → version=7" style="html=1;" edge="1" parent="1" source="lfA" target="lfS">
+          <mxGeometry relative="1" as="geometry"/>
+          <mxPoint x="280" y="115" as="exitPoint"/>
+          <mxPoint x="510" y="115" as="entryPoint"/>
+        </mxCell>
+        <mxCell id="m2" value="② GET /api/settings → version=7" style="html=1;" edge="1" parent="1" source="lfB" target="lfS">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m3" value="③ PUT version=7(保存)" style="html=1;" edge="1" parent="1" source="lfA" target="lfS">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m4" value="④ 200 OK,version=8" style="html=1;dashed=1;" edge="1" parent="1" target="lfA" source="lfS">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m5" value="⑤ PUT version=7(仍持旧值)" style="html=1;" edge="1" parent="1" source="lfB" target="lfS">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m6" value="⑥ 409 已被其他窗口保存,请刷新" style="html=1;dashed=1;strokeColor=#b85450;fontColor=#b85450;" edge="1" parent="1" target="lfB" source="lfS">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m7" value="⑦ GET → version=8" style="html=1;" edge="1" parent="1" source="lfB" target="lfS">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m8" value="⑧ PUT version=8 → 200 OK" style="html=1;" edge="1" parent="1" source="lfB" target="lfS">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note1" value="PUT /api/settings/asr(转写通道快捷切换)同口径;前端保存成功后派发 mmb-settings-changed 事件刷新看板" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="140" y="560" width="880" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="ZCode">
+  <diagram id="auth07" name="认证与会话安全流程">
+    <mxGraphModel dx="1100" dy="700" grid="1" gridSize="10" page="1" pageWidth="640" pageHeight="700">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="lane1" value="首次启动" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="540" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="a1" value="无 auth.json → 自动生成一次性随机口令(仅启动日志打印一次)或读 MMB_ADMIN_PASSWORD" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane1">
+          <mxGeometry x="20" y="45" width="240" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="a2" value="初始化 auth.json:bcrypt 哈希落盘,defaultPassword 标记提醒改密(原子写)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="lane1">
+          <mxGeometry x="280" y="45" width="240" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane2" value="运行期" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="240" width="540" height="290" as="geometry"/>
+        </mxCell>
+        <mxCell id="b1" value="POST /api/auth/login → bcrypt 校验 + 失败计数(错 → 401)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane2">
+          <mxGeometry x="20" y="45" width="500" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="b2" value="成功 → 签发会话令牌,Set-Cookie: mt_session(HttpOnly)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane2">
+          <mxGeometry x="20" y="100" width="500" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="b3" value="业务请求:Cookie + X-Requested-With(非 GET 必须,防 CSRF)→ 令牌有效且未撤销 → 放行;否则 401" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane2">
+          <mxGeometry x="20" y="155" width="500" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="b4" value="POST /api/auth/logout 撤销令牌;POST /api/auth/password 旧口令校验后改密" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane2">
+          <mxGeometry x="20" y="210" width="500" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="note1" value="审计:登录/登出/改密/失败均落审计日志(控制字符清洗,不信任 X-Forwarded-For);测试类接口限流 6 次/分/IP" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="545" width="540" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="lane1" source="a1" target="a2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="lane2" source="b1" target="b2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="lane2" source="b2" target="b3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="lane2" source="b3" target="b4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

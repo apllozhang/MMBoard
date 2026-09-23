@@ -40,6 +40,10 @@
 
 ## 4. 设置(模型/转写通道/白名单)
 
+![设置并发控制时序](../diagrams/svg/08-设置并发控制时序.svg)
+
+> 编辑源:`../diagrams/08-设置并发控制时序.drawio`(version 并发保护;PUT /api/settings/asr 同口径)
+
 | 方法 路径 | 请求 | 响应/说明 |
 |---|---|---|
 | GET `/api/settings` | — | `{version, activeId, models[](apiKey 打码), allowedLlmHosts[], asr, iflytek(appId 明文,key/secret 打码,fromFallback), fallback?}` |
