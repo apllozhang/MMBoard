@@ -17,10 +17,10 @@
         <mxCell id="p4" value="候选容器试跑:隔离数据卷快照(alpine cp)&lt;br&gt;(绝不写生产数据)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
           <mxGeometry x="440" y="332" width="320" height="70" as="geometry"/>
         </mxCell>
-        <mxCell id="d1" value="健康检查通过?&lt;br&gt;(/api/version commit=本次 且 auth 可用)" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+        <mxCell id="d1" value="切换后核验:commit=本次 且 auth 可用?&lt;br&gt;(DEPLOY_DRILL=1 在此注入不匹配期望)" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
           <mxGeometry x="440" y="442" width="320" height="100" as="geometry"/>
         </mxCell>
-        <mxCell id="rb" value="自动回滚:用旧镜像重启生产容器&lt;br&gt;(旧镜像 ID 见部署日志)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+        <mxCell id="rb" value="自动回滚:用旧镜像重启生产容器&lt;br&gt;(此路径触发时,生产已短暂运行新版本)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
           <mxGeometry x="860" y="447" width="300" height="90" as="geometry"/>
         </mxCell>
         <mxCell id="p5" value="停旧容器 → 候选镜像起生产容器&lt;br&gt;(挂生产数据卷,端口 8099)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
@@ -32,8 +32,8 @@
         <mxCell id="p6" value="DEPLOY OK:登记镜像 ID 与回滚镜像(台账)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d8;strokeColor=#82b366;" vertex="1" parent="1">
           <mxGeometry x="440" y="812" width="320" height="56" as="geometry"/>
         </mxCell>
-        <mxCell id="note" value="DEPLOY_DRILL=1:注入健康检查失败,演练回滚路径(建议每次大版本前执行)" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="860" y="600" width="320" height="60" as="geometry"/>
+        <mxCell id="note" value="阶段一/二失败(打包/构建/候选检查)= 旧容器保持不动,不发生回滚;DEPLOY_DRILL=1 仅在切换后核验点注入失败,建议每次大版本前执行" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="860" y="600" width="320" height="80" as="geometry"/>
         </mxCell>
         <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="p1" target="p2">
           <mxGeometry relative="1" as="geometry"/>

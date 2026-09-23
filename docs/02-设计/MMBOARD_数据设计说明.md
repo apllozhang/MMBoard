@@ -2,6 +2,11 @@
 
 | 项 | 值 |
 |---|---|
+| 文档状态 | ✅ 成文(已按《文档库质量提升指导》核对) |
+| 适用功能版本 | `7e55f94` |
+| 最近核对日期 | 2026-09-23 |
+| 维护责任人 | 待指定(项目方) |
+| 事实依据 | server/pipeline.cjs 写入语句、server/persist.cjs、生产数据卷实际文件 |
 | 版本 | v1.0(as-built) |
 | 日期 | 2026-09-23 |
 | 基线 | `7e55f94` |
@@ -87,8 +92,81 @@ data/
 | 文件 | 内容 |
 |---|---|
 | `*.html` | ALE 规范纪要(文件名含标题 slug、v0.1 版本戳、日期);内嵌完整性横幅与证据警示 |
-| `transcript.json` | `{ text, segments[{start,end,text,speaker}], hasSpeakers, speakerMap }`——"仅重跑分析"复用,不耗转写额度 |
-| `analysis.json` | 规范化分析结果 + `quoteState/trefState` + `partial/chunkFailures/samplingTruncated` 等完整性字段;纯重渲染直接复用 |
+| `transcript.json` | 转写底稿——"仅重跑分析"复用,不耗转写额度 |
+| `analysis.json` | 分析结果 + 发言统计 + 渲染元信息(三层结构,见下) |
+
+### 6.1 transcript.json(结构真实示例)
+
+写入方:`server/pipeline.cjs`(转写完成后原子写)。时间单位毫秒;`speaker` 为 canonical 编号。
+
+```json
+{
+  "text": "[00:00] 说话人0: 各位好,开始本周评审。",
+  "segments": [
+    { "start": 150, "end": 4210, "text": "各位好,开始本周评审。", "speaker": "0" }
+  ],
+  "hasSpeakers": true,
+  "speakerMap": { "0": "张三" }
+}
+```
+
+### 6.2 analysis.json(三层结构,P1 修正)
+
+写入方:`server/pipeline.cjs` 的 `analyzeAndRender`。**顶层是 `{ analysis, talkStats, meta }` 三个键**;完整性字段(`partial`、`chunkFailures`、`missingFields`、`samplingTruncated`)与证据状态(`quoteState/trefState`)都在 `analysis` **内部**。以下为脱敏、结构真实的示例(值均为示意):
+
+```json
+{
+  "analysis": {
+    "title": "周项目评审会",
+    "missingFields": [],
+    "chunkFailures": [],
+    "summary": "本周完成三个事项的评审……",
+    "topics": [{ "heading": "进度", "person": "说话人0", "detail": "……" }],
+    "decisions": ["采用方案 A,下周二前上线"],
+    "actions": [
+      {
+        "owner": "说话人1", "item": "提交测试报告", "due": "周五",
+        "quote": "测试报告周五前提交",
+        "tref": "12:30-13:05",
+        "quoteState": "verified",
+        "trefState": "verified"
+      }
+    ],
+    "risks": ["第三方接口稳定性"],
+    "highlights": ["提前完成联调"],
+    "strengths": [], "weaknesses": [], "comparison": null,
+    "partial": false,
+    "samplingTruncated": false,
+    "samplingCoverage": 100,
+    "mock": false
+  },
+  "talkStats": [
+    { "speaker": "说话人0", "ms": 612000, "pct": 61.2 },
+    { "speaker": "说话人1", "ms": 388000, "pct": 38.8 }
+  ],
+  "meta": {
+    "date": "2026-09-22",
+    "fileName": "meeting.mp3",
+    "transcriptChars": 38214,
+    "transcriptionMode": "local",
+    "analysisMode": "real",
+    "uploadedAt": "2026-09-22T01:00:00.000Z",
+    "generatedAt": "2026-09-22T01:06:32.000Z",
+    "meetingOccurredAt": null
+  }
+}
+```
+
+要点:
+
+- `talkStats` 与 `meta` 在顶层,**渲染模板直接读取**;`analysis` 内部字段与 LLM 输出一一对应;
+- `partial=true` 或 `chunkFailures` 非空时,渲染模板生成「内容完整性提示」横幅——字段随本文件持久化,改名纯重渲染后警示仍在;
+- `quoteState/trefState` 由 `verifyActionEvidence`(minutes-template.cjs)在落盘前写入;
+- 纯重渲染输入即本文件,不重新调用 LLM。
+
+### 6.3 纪要 HTML
+
+文件名 `{标题slug}-v0.1-{YYYYMMDD}.html`;包含完整性横幅(`role="note"`)、行动项证据警示(`.tref-warn`)与发言统计图表。
 
 segments 时间单位为毫秒;`speaker` 为 canonical(`"0"`/`"1"`…),渲染时才应用 speakerMap。
 

@@ -2,6 +2,11 @@
 
 | 项 | 值 |
 |---|---|
+| 文档状态 | ✅ 成文(已按《文档库质量提升指导》核对) |
+| 适用功能版本 | `7e55f94` |
+| 最近核对日期 | 2026-09-23 |
+| 维护责任人 | 待指定(项目方) |
+| 事实依据 | server/pipeline.cjs、server/llm.cjs、server/minutes-template.cjs、server/persist.cjs、server/server.cjs |
 | 版本 | v1.0(as-built) |
 | 日期 | 2026-09-23 |
 | 基线 | `7e55f94` |
@@ -170,6 +175,23 @@ analyzeChunked                  逐块 map → 失败块记入 chunkFailures[{in
 - 看板:任务表(编号/会议名/阶段/进度/字数/时间/操作),移动端卡片式;进度条 `role=progressbar`;详情弹窗双层 inert/焦点圈闭;表格容器内局部滚动,根元素禁横向溢出。
 - 徽标:任务 `quotaRecordFailed` 显示「额度未记账」。
 
-## 10. 已知限制(如实)
+## 11. 关键机制代码位置索引(复核入口)
+
+按"问题 → 机制 → 代码位置 → 可观察结果 → 限制"整理,供新维护者从文档走到代码:
+
+| 机制 | 解决什么问题 | 代码位置 | 如何复核(可观察结果) | 限制 |
+|---|---|---|---|---|
+| runId 取代 | 重跑与旧执行的写入冲突 | `server/pipeline.cjs`:`updateTask`/`setStep`/`checkRunAlive` | 重跑分析后旧任务日志出现"运行实例已被取代";产物只含新结果 | 仅单进程内有效 |
+| 编号高水位 | 删除+重启后编号复用 | `server/pipeline.cjs`:`createTask`(SEQ_FILE) | verify R02 节;删除当天最新后重建,编号不复用 | 编号日期段为 UTC |
+| 原子持久化 | 状态文件损坏/半写 | `server/persist.cjs`:`writeJsonAtomic`/`readJsonWithRecovery` | verify B 节;损坏副本隔离为 `.corrupt` | 跨实例需外部锁(范围外) |
+| 分块 map/reduce | 超长会议中段决议丢失 | `server/llm.cjs`:`analyzeChunked`/`mapChunkWithRetry`/`splitChunks` | verify R13 节;>42000 字任务日志含"长会分块提取:N 块" | 单块失败如实标 partial,该块决议可能缺失 |
+| 强制 partial | 分块失败被冒充完整(F01) | `server/llm.cjs`:`analyzeChunked` 尾部;`server/minutes-template.cjs`:`noticeBannerHtml` | verify F01 四组;纪要顶部「第 N 块提取失败」横幅 | — |
+| 证据强校验 | 行动项引用不可溯源 | `server/minutes-template.cjs`:`verifyActionEvidence` | verify R15 节;纪要行动项警示 | 基于 LLM 给出的 tref,语音级对齐未做 |
+| 额度 fail-closed | 消耗额度却不记账(R09) | `server/pipeline.cjs`:`assertQuotaReady`/`recordQuotaAfterTranscribe` | verify R09 节;额度双坏时新任务失败且讯飞零调用 | 预检后的磁盘瞬时故障由后置标记兜底 |
+| 上传四道防线 | 资源耗尽/坏文件(R18) | `server/server.cjs` 上传中间件;`server/pipeline.cjs`:`reserveUploadQuota`/`probeHasMediaStream` | verify R18 节;503/400 可现场复现 | 无 Content-Length 的 chunked 上传依赖 multer 2GB 兜底 |
+| LLM 地址安全 | SSRF/DNS rebinding/重定向(R05) | `server/llm.cjs`:`resolveLlmTarget`/`postJson`;`server/local.cjs`:`guardedFetch`;`server/server.cjs` 设置测试接口 | verify R05 节(含 DNS 劫持与 302 注入) | 本地 ASR 用私网 CIDR 发现范围(裁定接受) |
+| 回滚演练 | 发布失败路径未经验证 | `deploy/deploy.cjs`(DRILL 注入点=切换后核验) | `DEPLOY_DRILL=1` 日志含 `[deploy][DRILL]`;演练后 `/api/version` = 旧版本 | 生产短暂运行新版本(见《部署手册》§5) |
+
+## 12. 已知限制(如实)
 
 单实例(无跨进程锁);无 HTTPS/代理层治理(内网部署既定决策);无监控告警接入(人工巡检,见《运维手册》);`./fonts/noto.css` 构建期提示运行时解析(历史遗留,不影响构建产物)。
