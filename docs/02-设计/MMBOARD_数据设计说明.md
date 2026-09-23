@@ -110,9 +110,9 @@ data/
 }
 ```
 
-### 6.2 analysis.json(三层结构,P1 修正)
+### 6.2 analysis.json(三层结构;示例已按写入实参逐字段核对)
 
-写入方:`server/pipeline.cjs` 的 `analyzeAndRender`。**顶层是 `{ analysis, talkStats, meta }` 三个键**;完整性字段(`partial`、`chunkFailures`、`missingFields`、`samplingTruncated`)与证据状态(`quoteState/trefState`)都在 `analysis` **内部**。以下为脱敏、结构真实的示例(值均为示意):
+写入方:`server/pipeline.cjs` 的 `analyzeAndRender`(`writeJsonAtomic(path.join(outDir, "analysis.json"), …)`)。**顶层是 `{ analysis, talkStats, meta }` 三个键**;完整性字段(`partial`、`chunkFailures`、`missingFields`、`samplingTruncated`)与证据状态(`quoteState/trefState`)都在 `analysis` **内部**。以下为脱敏、结构真实的示例(值均为示意):
 
 ```json
 {
@@ -134,7 +134,12 @@ data/
     ],
     "risks": ["第三方接口稳定性"],
     "highlights": ["提前完成联调"],
-    "strengths": [], "weaknesses": [], "comparison": null,
+    "strengths": [],
+    "weaknesses": [],
+    "comparison": [],
+    "suggestions": [],
+    "consensus": [],
+    "doubts": [],
     "partial": false,
     "samplingTruncated": false,
     "samplingCoverage": 100,
@@ -150,12 +155,22 @@ data/
     "transcriptChars": 38214,
     "transcriptionMode": "local",
     "analysisMode": "real",
-    "uploadedAt": "2026-09-22T01:00:00.000Z",
-    "generatedAt": "2026-09-22T01:06:32.000Z",
-    "meetingOccurredAt": null
+    "uploadedAt": "2026-09-22T01:00:00.000Z"
   }
 }
 ```
+
+**字段来源逐项核对**(示例值可替换;字段层级、类型、可选性不可虚构):
+
+| 字段 | 来源 |
+|---|---|
+| `analysis.*` 全部键 | `server/llm.cjs` `normalizeAnalysis` 的**固定输出**——title/missingFields/chunkFailures/summary/topics/decisions/actions/risks/highlights/strengths/weaknesses/comparison/suggestions/consensus/doubts/partial/samplingTruncated 恒存在(LLM 未给时数组为空、布尔为推导值);`samplingCoverage` 与 `mock` 由 `analyzeOnce` 追加 |
+| `analysis.partial` | 推导布尔:`JSON 截断 ‖ missingFields 非空`;分块路径存在失败块时由 `analyzeChunked` 强制置 true(F01) |
+| `analysis.actions[].quoteState/trefState` | `verifyActionEvidence`(minutes-template.cjs)落盘前写入;无 quote/tref 时为 `"none"` |
+| `talkStats[]` | pipeline 由 segments 时间戳累计(`speaker` 为 canonical、`ms` 毫秒、`pct` 一位小数);无有效分段时为 `[]` |
+| `meta.*` 六个键 | **持久化 meta 仅有这六项**:date(本地日期,取 createdAt)、fileName(originalFileName 优先)、transcriptChars、transcriptionMode、analysisMode(mock→"mock"/否则"real")、uploadedAt(=createdAt) |
+
+**特别注意**:渲染模板当次还会收到 `generatedAt`(渲染时刻)与 `meetingOccurredAt` 等元信息,但那是**渲染时入参**——`writeJsonAtomic` 写入 `analysis.json` 的 meta **不含**这两个字段。编写读取程序时不要依赖它们存在。
 
 要点:
 

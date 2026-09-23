@@ -1,39 +1,42 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mxfile host="ZCode">
   <diagram id="deploy06" name="发布与回滚流程">
-    <mxGraphModel dx="1100" dy="700" grid="1" gridSize="10" page="1" pageWidth="1250" pageHeight="950">
+    <mxGraphModel dx="1100" dy="700" grid="1" gridSize="10" page="1" pageWidth="1250" pageHeight="1100">
       <root>
         <mxCell id="0"/>
         <mxCell id="1" parent="0"/>
         <mxCell id="p1" value="开发机:发布前检查单&lt;br&gt;(typecheck / build / verify 182 全绿 / scan:secrets)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
           <mxGeometry x="440" y="40" width="320" height="60" as="geometry"/>
         </mxCell>
-        <mxCell id="p2" value="tar 打包(排除 node_modules / data / 密钥)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
-          <mxGeometry x="440" y="140" width="320" height="56" as="geometry"/>
+        <mxCell id="p2" value="阶段一:tar 打包(排除 node_modules / data / 密钥)&lt;br&gt;→ 上传生产机解压(失败=旧容器保持不动)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="440" y="140" width="320" height="70" as="geometry"/>
         </mxCell>
-        <mxCell id="p3" value="上传生产机 → docker build 候选镜像 :cand" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
-          <mxGeometry x="440" y="236" width="320" height="56" as="geometry"/>
+        <mxCell id="p3" value="docker build 候选镜像 :cand&lt;br&gt;(失败=旧容器保持不动)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="440" y="250" width="320" height="60" as="geometry"/>
         </mxCell>
-        <mxCell id="p4" value="候选容器试跑:隔离数据卷快照(alpine cp)&lt;br&gt;(绝不写生产数据)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
-          <mxGeometry x="440" y="332" width="320" height="70" as="geometry"/>
+        <mxCell id="p4" value="候选容器试跑:隔离数据卷快照&lt;br&gt;(绝不写生产数据)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="440" y="350" width="320" height="60" as="geometry"/>
         </mxCell>
-        <mxCell id="d1" value="切换后核验:commit=本次 且 auth 可用?&lt;br&gt;(DEPLOY_DRILL=1 在此注入不匹配期望)" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
-          <mxGeometry x="440" y="442" width="320" height="100" as="geometry"/>
+        <mxCell id="d1" value="候选健康检查:2xx×2&lt;br&gt;且 commit=本次?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="440" y="450" width="320" height="100" as="geometry"/>
         </mxCell>
-        <mxCell id="rb" value="自动回滚:用旧镜像重启生产容器&lt;br&gt;(此路径触发时,生产已短暂运行新版本)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
-          <mxGeometry x="860" y="447" width="300" height="90" as="geometry"/>
+        <mxCell id="c1" value="清理候选容器与候选卷;&lt;br&gt;旧容器保持运行(未切换,无回滚)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="850" y="460" width="300" height="80" as="geometry"/>
         </mxCell>
-        <mxCell id="p5" value="停旧容器 → 候选镜像起生产容器&lt;br&gt;(挂生产数据卷,端口 8099)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
-          <mxGeometry x="440" y="582" width="320" height="70" as="geometry"/>
+        <mxCell id="p5" value="阶段二→三:记录旧镜像 ID(回滚依据)&lt;br&gt;→ 停旧容器 → 候选镜像起生产容器(挂生产数据卷)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="440" y="600" width="320" height="70" as="geometry"/>
         </mxCell>
-        <mxCell id="d2" value="再验健康通过?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
-          <mxGeometry x="440" y="692" width="320" height="80" as="geometry"/>
+        <mxCell id="d2" value="切换后核验:commit=本次 且 auth 可用?&lt;br&gt;⚠ DEPLOY_DRILL=1 在此注入不匹配期望&lt;br&gt;(生产已短暂运行新版本)" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="440" y="710" width="320" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="rb" value="自动回滚:用旧镜像 ID 重启生产容器&lt;br&gt;(回滚后核验 /api/version = 旧版本)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="850" y="720" width="300" height="80" as="geometry"/>
         </mxCell>
         <mxCell id="p6" value="DEPLOY OK:登记镜像 ID 与回滚镜像(台账)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d8;strokeColor=#82b366;" vertex="1" parent="1">
-          <mxGeometry x="440" y="812" width="320" height="56" as="geometry"/>
+          <mxGeometry x="440" y="880" width="320" height="56" as="geometry"/>
         </mxCell>
-        <mxCell id="note" value="阶段一/二失败(打包/构建/候选检查)= 旧容器保持不动,不发生回滚;DEPLOY_DRILL=1 仅在切换后核验点注入失败,建议每次大版本前执行" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="860" y="600" width="320" height="80" as="geometry"/>
+        <mxCell id="note" value="阶段一/二任一失败 = 尚未切换,不涉及回滚;只有阶段三(切换后)的核验失败才会触发回滚。DEPLOY_DRILL=1 演练请安排在授权窗口,并按《部署手册》§5 做演练后版本核验。" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="850" y="850" width="330" height="90" as="geometry"/>
         </mxCell>
         <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="p1" target="p2">
           <mxGeometry relative="1" as="geometry"/>
@@ -47,7 +50,7 @@
         <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="p4" target="d1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="e5" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d1" target="rb">
+        <mxCell id="e5" value="否(未切换)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d1" target="c1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
         <mxCell id="e6" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d1" target="p5">
@@ -56,10 +59,10 @@
         <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="p5" target="d2">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="e8" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d2" target="p6">
+        <mxCell id="e8" value="否(DRILL 注入/真失败)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d2" target="rb">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="e9" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d2" target="rb">
+        <mxCell id="e9" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" edge="1" parent="1" source="d2" target="p6">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
       </root>
